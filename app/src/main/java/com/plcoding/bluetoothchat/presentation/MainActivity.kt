@@ -3,33 +3,46 @@ package com.plcoding.bluetoothchat.presentation
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.plcoding.bluetoothchat.presentation.components.ChatScreen
 import com.plcoding.bluetoothchat.presentation.components.DeviceScreen
+import com.plcoding.bluetoothchat.presentation.components.SecurityAlertDialog
 import com.plcoding.bluetoothchat.ui.theme.BluetoothChatTheme
 import dagger.hilt.android.AndroidEntryPoint
+import androidx.compose.material.AlertDialog as AlertDialog1
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -44,6 +57,7 @@ class MainActivity : ComponentActivity() {
     private val isBluetoothEnabled: Boolean
         get() = bluetoothAdapter?.isEnabled == true
 
+    @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -78,11 +92,35 @@ class MainActivity : ComponentActivity() {
             BluetoothChatTheme {
                 val viewModel = hiltViewModel<BluetoothViewModel>()
                 val state by viewModel.state.collectAsState()
+                val context = LocalContext.current
+                val securityAlert by viewModel.securityAlert.collectAsState()
+
+                SecurityAlertHandler(viewModel)
+                DisposableEffect(Unit) {
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(context: Context, intent: Intent) {
+                            if (intent.action == "SECURITY_ALERT") {
+                                viewModel.onSecurityAlert(
+                                    intent.getStringExtra("ATTACK_TYPE") ?: "unknown",
+                                    intent.getStringExtra("DEVICE_NAME") ?: "Unknown",
+                                    intent.getStringExtra("MESSAGE") ?: ""
+                                )
+                            }
+                        }
+                    }
+                    context.registerReceiver(receiver,
+                        IntentFilter("SECURITY_ALERT"),
+                        android.content.Context.RECEIVER_NOT_EXPORTED)
+
+                    onDispose {
+                        context.unregisterReceiver(receiver)
+                    }
+                }
 
                 LaunchedEffect(key1 = state.errorMessage) {
                     state.errorMessage?.let { message ->
                         Toast.makeText(
-                            applicationContext,
+                            context,
                             message,
                             Toast.LENGTH_LONG
                         ).show()
@@ -92,7 +130,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(key1 = state.isConnected) {
                     if(state.isConnected) {
                         Toast.makeText(
-                            applicationContext,
+                            context,
                             "You're connected!",
                             Toast.LENGTH_LONG
                         ).show()
@@ -101,7 +139,7 @@ class MainActivity : ComponentActivity() {
 
                 Surface(
                     color = MaterialTheme.colors.background
-                ) {
+                ) {Box(modifier = Modifier.fillMaxSize()){
                     when {
                         state.isConnecting -> {
                             Column(
@@ -130,7 +168,40 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                    securityAlert?.let { alert ->
+                        AlertDialog1(
+                            onDismissRequest = { viewModel.clearSecurityAlert() },
+                            title = {
+                                Text(
+                                    "Security Alert - ${alert.attackType.replaceFirstChar { it.uppercase() }}",
+                                    color = MaterialTheme.colors.error
+                                )
+                            },
+                            text = {
+                                Column {
+                                    Text("Device: ${alert.deviceName}")
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("Message: ${alert.message.take(200)}")
+                                }
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { viewModel.clearSecurityAlert() }) {
+                                    Text("OK")
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(
+                                    onClick = { /* Handle block */ },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = MaterialTheme.colors.error
+                                    )
+                                ) {
+                                    Text("BLOCK DEVICE")
+                                }
+                            }
+                        )
                 }
+                } }
             }
         }
     }

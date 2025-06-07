@@ -13,7 +13,9 @@ import javax.inject.Inject
 
 @HiltViewModel
 class BluetoothViewModel @Inject constructor(
-    private val bluetoothController: BluetoothController
+    private val bluetoothController: BluetoothController,
+    private val _securityAlert: MutableStateFlow<SecurityAlert?> = MutableStateFlow<SecurityAlert?>(null),
+    val securityAlert: StateFlow<SecurityAlert?> = _securityAlert.asStateFlow()
 ): ViewModel() {
 
     private val _state = MutableStateFlow(BluetoothUiState())
@@ -123,4 +125,21 @@ class BluetoothViewModel @Inject constructor(
         super.onCleared()
         bluetoothController.release()
     }
+    fun onSecurityAlert(attackType: String, deviceName: String, message: String) {
+        val also1 = SecurityAlert(
+            attackType = attackType,
+            deviceName = deviceName,
+            message = message
+        ).also { val also = it.also { _securityAlert.value = it } }
+    }
+
+    fun clearSecurityAlert() {
+        _securityAlert.value = null
+    }
+
+    data class SecurityAlert(
+        val attackType: String,
+        val deviceName: String,
+        val message: String
+    )
 }
