@@ -4,6 +4,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -21,7 +26,7 @@ fun SecurityAlertDialog(
         title = {
             Text(
                 text = "Security Alert - ${alert.attackType.replaceFirstChar { it.uppercase() }}",
-                color = MaterialTheme.colors.error
+                color = MaterialTheme.colorScheme.error
             )
         },
         text = {
@@ -42,7 +47,7 @@ fun SecurityAlertDialog(
             TextButton(
                 onClick = onBlockDevice,
                 colors = ButtonDefaults.textButtonColors(
-                    contentColor = MaterialTheme.colors.error
+                    contentColor = MaterialTheme.colorScheme.error
                 )
             ) {
                 Text(text = "BLOCK DEVICE")

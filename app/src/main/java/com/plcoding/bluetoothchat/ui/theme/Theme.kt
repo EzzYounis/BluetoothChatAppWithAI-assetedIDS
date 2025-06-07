@@ -1,30 +1,23 @@
 package com.plcoding.bluetoothchat.ui.theme
 
+import Shapes
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material.MaterialTheme
-import androidx.compose.material.darkColors
-import androidx.compose.material.lightColors
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+
 import androidx.compose.runtime.Composable
 
-private val DarkColorPalette = darkColors(
+private val DarkColorScheme = darkColorScheme(
     primary = Purple200,
-    primaryVariant = Purple700,
-    secondary = Teal200
+    secondary = Purple700,
+    tertiary = Purple500
 )
 
-private val LightColorPalette = lightColors(
-    primary = Purple500,
-    primaryVariant = Purple700,
-    secondary = Teal200
-
-    /* Other default colors to override
-    background = Color.White,
-    surface = Color.White,
-    onPrimary = Color.White,
-    onSecondary = Color.Black,
-    onBackground = Color.Black,
-    onSurface = Color.Black,
-    */
+private val LightColorScheme = lightColorScheme(
+    primary = Purple200,
+    secondary = Purple700,
+    tertiary = Purple500
 )
 
 @Composable
@@ -32,15 +25,15 @@ fun BluetoothChatTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
-    val colors = if (darkTheme) {
-        DarkColorPalette
+    val colorScheme = if (darkTheme) {
+        DarkColorScheme
     } else {
-        LightColorPalette
+        LightColorScheme
     }
 
     MaterialTheme(
-        colors = colors,
-        typography = Typography,
+        colorScheme = colorScheme,
+
         shapes = Shapes,
         content = content
     )

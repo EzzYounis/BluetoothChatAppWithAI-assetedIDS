@@ -1,27 +1,30 @@
 package com.plcoding.bluetoothchat.data.chat
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Environment
 import android.util.Log
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.plcoding.bluetoothchat.domain.chat.*
 import com.plcoding.bluetoothchat.presentation.IDS.BluetoothFeatureExtractor
 import com.plcoding.bluetoothchat.presentation.IDS.IDSModel
+import com.plcoding.bluetoothchat.presentation.SecurityAlert
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import java.io.File
 import java.io.IOException
-import java.nio.FloatBuffer
+import java.io.InputStream
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
@@ -30,7 +33,9 @@ class BluetoothDataTransferService(
     private val context: Context,
     private val socket: BluetoothSocket,
     private val messageLogDao: MessageLogDao? = null,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val onSecurityAlert: (SecurityAlert) -> Unit,
+    private val isSocketConnected: AtomicBoolean = AtomicBoolean(true)
 ) {
     // File logging configuration
     private val logDirectory by lazy {
@@ -48,6 +53,9 @@ class BluetoothDataTransferService(
     private val featureExtractor = BluetoothFeatureExtractor()
     private lateinit var idsModel: IDSModel
     private val modelInitialized = AtomicBoolean(false)
+
+    // Message channel for proper flow handling
+    private val messageChannel = Channel<BluetoothMessage>(Channel.UNLIMITED)
 
     init {
         initIDSModel()
@@ -68,126 +76,185 @@ class BluetoothDataTransferService(
     @SuppressLint("MissingPermission")
     fun listenForIncomingMessages(): Flow<BluetoothMessage> = flow {
         val buffer = ByteArray(1024)
-        while (true) {
-            val byteCount = try {
-                socket.inputStream.read(buffer)
-            } catch (e: IOException) {
-                if (socket.isConnected) throw TransferFailedException()
-                else break
-            }
+        val inputStream = socket.inputStream
 
-            val messageText = buffer.decodeToString(endIndex = byteCount)
-            val remoteDevice = socket.remoteDevice
-            val message = BluetoothMessage(
-                message = messageText,
-                senderName = remoteDevice.name ?: "Unknown",
-                isFromLocalUser = false
-            )
+        try {
+            while (isSocketConnected.get() && socket.isConnected) {
+                try {
+                    val byteCount = inputStream.read(buffer)
 
-            logMessage(
-                fromDevice = remoteDevice.name ?: "Unknown",
-                toDevice = BluetoothAdapter.getDefaultAdapter()?.name ?: "Local",
-                message = messageText,
-                direction = "INCOMING"
-            )
+                    if (byteCount <= 0) {
+                        Log.d("BluetoothService", "Connection closed by remote device")
+                        break
+                    }
 
-            if (modelInitialized.get()) {
-                scope.launch {
-                    detectIntrusion(
+                    val messageText = String(buffer, 0, byteCount, Charsets.UTF_8).trim()
+                    if (messageText.isEmpty()) continue
+
+                    val remoteDevice = socket.remoteDevice
+                    Log.d("BluetoothService", "Received message: $messageText from ${remoteDevice?.name}")
+
+                    // Log incoming message
+                    logMessage(
+                        fromDevice = remoteDevice?.name ?: "Unknown",
+                        toDevice = BluetoothAdapter.getDefaultAdapter()?.name ?: "Local",
                         message = messageText,
-                        device = remoteDevice.address,
-                        deviceName = remoteDevice.name ?: "Unknown",
-                        direction = "INCOMING",
-                        timestamp = System.currentTimeMillis()
+                        direction = "INCOMING"
                     )
+
+                    var detectionResult: IDSModel.AnalysisResult? = null
+
+                    // IDS Analysis
+                    if (modelInitialized.get()) {
+                        detectionResult = idsModel.analyzeMessage(messageText)
+
+                        if (detectionResult.isAttack) {
+                            handleSecurityAlert(detectionResult, messageText)
+
+                            // Send alert back to sender
+                            try {
+                                val alertMsg = """
+                                    [SECURITY ALERT]
+                                    Your message was blocked
+                                    Reason: ${detectionResult.attackType}
+                                    Detected by: ${if (detectionResult.aiDetected) "AI" else "rules"}
+                                """.trimIndent()
+
+                                socket.outputStream.write(alertMsg.toByteArray(Charsets.UTF_8))
+                                socket.outputStream.flush()
+                            } catch (e: Exception) {
+                                Log.e("BluetoothService", "Failed to send security alert", e)
+                            }
+                        }
+                    }
+
+                    val message = BluetoothMessage(
+                        message = messageText,
+                        senderName = remoteDevice?.name ?: "Unknown",
+                        isFromLocalUser = false,
+                        isAttack = detectionResult?.isAttack ?: false
+                    )
+
+                    emit(message)
+
+                } catch (e: IOException) {
+                    if (e.message?.contains("bt socket closed") == true ||
+                        e.message?.contains("Connection reset") == true) {
+                        Log.i("BluetoothService", "Socket closed during read operation")
+                    } else {
+                        Log.e("BluetoothService", "Read error: ${e.message}")
+                    }
+                    break
+                } catch (e: Exception) {
+                    Log.e("BluetoothService", "Unexpected error reading message", e)
+                    continue
                 }
             }
-
-            emit(message)
+        } catch (e: Exception) {
+            Log.e("BluetoothService", "Error in message listening loop", e)
+        } finally {
+            Log.d("BluetoothService", "Message listening stopped")
         }
     }.flowOn(Dispatchers.IO)
 
+    private fun handleSecurityAlert(result: IDSModel.AnalysisResult, message: String) {
+        val device = socket.remoteDevice
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        onSecurityAlert(
+            SecurityAlert(
+                attackType = result.attackType,
+                deviceName = device?.name ?: "Unknown",
+                deviceAddress = device?.address ?: "Unknown",
+                message = message,
+                detectionMethod = if (result.aiDetected) "AI Model" else "Rule-based",
+                explanation = result.explanation
+            )
+        )
+    }
+
     @SuppressLint("MissingPermission")
     suspend fun sendMessage(bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
+        if (!isSocketConnected.get() || !socket.isConnected) {
+            Log.w("BluetoothTransfer", "Cannot send message - socket not connected")
+            return@withContext false
+        }
+
         try {
-            socket.outputStream.write(bytes)
-            val message = bytes.decodeToString()
+            val messageText = String(bytes, Charsets.UTF_8)
             val remoteDevice = socket.remoteDevice
 
+            Log.d("BluetoothTransfer", "Sending message: $messageText to ${remoteDevice?.name}")
+
+            // Log the outgoing message
             logMessage(
                 fromDevice = BluetoothAdapter.getDefaultAdapter()?.name ?: "Local",
-                toDevice = remoteDevice.name ?: "Unknown",
-                message = message,
+                toDevice = remoteDevice?.name ?: "Unknown",
+                message = messageText,
                 direction = "OUTGOING"
             )
 
+            // Perform IDS analysis before sending
             if (modelInitialized.get()) {
-                scope.launch {
-                    detectIntrusion(
-                        message = message,
-                        device = remoteDevice.address,
-                        deviceName = remoteDevice.name ?: "Unknown",
-                        direction = "OUTGOING",
-                        timestamp = System.currentTimeMillis()
-                    )
+                val detectionResult = idsModel.analyzeMessage(messageText)
+                if (detectionResult.isAttack) {
+                    handleSecurityAlert(detectionResult, messageText)
+                    if (shouldBlockMessage(detectionResult)) {
+                        Log.w("BluetoothTransfer", "Message blocked by IDS: ${detectionResult.attackType}")
+                        return@withContext false
+                    }
                 }
             }
 
-            true
+            // Send the message with proper encoding
+            socket.outputStream.write(bytes)
+            socket.outputStream.flush()
+
+            Log.d("BluetoothTransfer", "Message sent successfully")
+            return@withContext true
+
         } catch (e: IOException) {
-            Log.e("BluetoothTransfer", "Message send failed", e)
-            false
-        }
-    }
-
-    private suspend fun detectIntrusion(
-        message: String,
-        device: String,
-        deviceName: String,
-        direction: String,
-        timestamp: Long
-    ) {
-        try {
-            val bluetoothMessage = BluetoothFeatureExtractor.BluetoothMessage(
-                timestamp = timestamp,
-                fromDevice = if (direction == "INCOMING") deviceName else "Local",
-                toDevice = if (direction == "INCOMING") "Local" else deviceName,
-                message = message,
-                direction = if (direction == "INCOMING")
-                    BluetoothFeatureExtractor.BluetoothMessage.Direction.INCOMING
-                else
-                    BluetoothFeatureExtractor.BluetoothMessage.Direction.OUTGOING
-            )
-
-            val features = featureExtractor.extractFeatures(bluetoothMessage)
-            val prediction = idsModel.predict(features)
-
-            if (prediction != "normal") {
-                notifySecurityAlert(
-                    attackType = prediction,
-                    message = message,
-                    deviceAddress = device,
-                    deviceName = deviceName
-                )
-            }
+            Log.e("BluetoothTransfer", "Message send failed: ${e.message}", e)
+            // Close connection on IO error
+            closeConnection()
+            return@withContext false
         } catch (e: Exception) {
-            Log.e("IDS", "Intrusion detection failed", e)
+            Log.e("BluetoothTransfer", "Unexpected error sending message", e)
+            return@withContext false
         }
     }
 
-    private fun notifySecurityAlert(
-        attackType: String,
-        message: String,
-        deviceAddress: String,
-        deviceName: String
-    ) {
-        val intent = Intent("SECURITY_ALERT").apply {
-            putExtra("ATTACK_TYPE", attackType)
-            putExtra("MESSAGE", message)
-            putExtra("DEVICE_ADDRESS", deviceAddress)
-            putExtra("DEVICE_NAME", deviceName)
+    private fun shouldBlockMessage(result: IDSModel.AnalysisResult): Boolean {
+        return when (result.attackType) {
+            "SPOOFING", "INJECTION", "FLOODING" -> true
+            else -> false
         }
-        ContextCompat.startForegroundService(context, intent)
+    }
+
+    fun closeConnection() {
+        if (isSocketConnected.compareAndSet(true, false)) {
+            try {
+                messageChannel.close()
+                socket.inputStream?.close()
+                socket.outputStream?.close()
+                socket.close()
+                Log.i("BluetoothService", "Socket closed gracefully")
+            } catch (e: IOException) {
+                if (e.message?.contains("closed") == true) {
+                    Log.i("BluetoothService", "Socket already closed")
+                } else {
+                    Log.e("BluetoothService", "Error closing socket", e)
+                }
+            } finally {
+                scope.cancel("Connection closed")
+            }
+        }
     }
 
     private suspend fun logMessage(
@@ -256,10 +323,7 @@ class BluetoothDataTransferService(
     }
 
     fun close() {
-        scope.cancel()
-        if (modelInitialized.get()) {
-            idsModel.close()
-        }
+        closeConnection()
     }
 
     companion object {

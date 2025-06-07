@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.*
+
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,11 +31,12 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.plcoding.bluetoothchat.presentation.components.ChatScreen
 import com.plcoding.bluetoothchat.presentation.components.DeviceScreen
+import com.plcoding.bluetoothchat.presentation.components.SecurityAlertHandler
 import com.plcoding.bluetoothchat.ui.theme.BluetoothChatTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(),SecurityAlertHandler {
 
     private val bluetoothManager by lazy {
         applicationContext.getSystemService(BluetoothManager::class.java)
@@ -44,6 +47,11 @@ class MainActivity : ComponentActivity() {
 
     private val isBluetoothEnabled: Boolean
         get() = bluetoothAdapter?.isEnabled == true
+    private val viewModel: BluetoothViewModel by viewModels()
+
+    override fun onSecurityAlert(alert: SecurityAlert) {
+        viewModel.onSecurityAlert(alert)
+    }
 
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,7 +106,8 @@ class MainActivity : ComponentActivity() {
                                         attackType = attackType,
                                         deviceName = deviceName,
                                         deviceAddress = deviceAddress,
-                                        message = message
+                                        message = message,detectionMethod = "Manual Trigger",
+                                        explanation = "This is a demonstration of the security alert system"
                                     )
                                 )
                             }
@@ -148,7 +157,7 @@ class MainActivity : ComponentActivity() {
                                     state = state,
                                     onDisconnect = viewModel::disconnectFromDevice,
                                     onSendMessage = viewModel::sendMessage,
-                                    viewModel = viewModel
+                                    viewModel = viewModel,
                                 )
                             }
                             else -> {

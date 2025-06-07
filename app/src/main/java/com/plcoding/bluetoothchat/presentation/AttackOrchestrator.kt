@@ -34,30 +34,52 @@ class AttackOrchestrator(
     private suspend fun simulateSpoofing() {
         val message = spoofingMessages.random()
         bluetoothController.trySendMessage(message)
-        triggerAlert("spoofing", message)
+        triggerAlert(
+            type = "spoofing",
+            message = message,
+            detectionMethod = "Simulated Attack",
+            explanation = "This is a simulated phishing attempt with malicious URL"
+        )
     }
 
     private suspend fun simulateInjection() {
         val message = injectionMessages.random()
         bluetoothController.trySendMessage(message)
-        triggerAlert("injection", message)
+        triggerAlert(
+            type = "injection",
+            message = message,
+            detectionMethod = "Simulated Attack",
+            explanation = "This is a simulated code injection attempt"
+        )
     }
 
     private suspend fun simulateFlooding() {
-        repeat(50) {  // Send 50 rapid messages
+        repeat(50) {
             bluetoothController.trySendMessage("FLOOD_${UUID.randomUUID()}")
-            delay(100) // 100ms between messages
+            delay(100)
         }
-        triggerAlert("flooding", "Mass message flood detected")
+        triggerAlert(
+            type = "flooding",
+            message = "Mass message flood detected",
+            detectionMethod = "Simulated Attack",
+            explanation = "This is a simulated message flooding attack"
+        )
     }
 
-    private fun triggerAlert(type: String, message: String) {
+    private fun triggerAlert(
+        type: String,
+        message: String,
+        detectionMethod: String,
+        explanation: String
+    ) {
         viewModel.onSecurityAlert(
             SecurityAlert(
                 attackType = type,
                 deviceName = "ATTACKER_${Random.nextInt(1000)}",
                 deviceAddress = generateRandomMac(),
-                message = message
+                message = message,
+                detectionMethod = detectionMethod,
+                explanation = explanation
             )
         )
     }
