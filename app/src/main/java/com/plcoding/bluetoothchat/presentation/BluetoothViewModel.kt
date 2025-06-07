@@ -1,12 +1,15 @@
 package com.plcoding.bluetoothchat.presentation
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.plcoding.bluetoothchat.domain.chat.BluetoothController
 import com.plcoding.bluetoothchat.domain.chat.BluetoothDeviceDomain
 import com.plcoding.bluetoothchat.domain.chat.ConnectionResult
+import dagger.assisted.Assisted
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -14,9 +17,10 @@ import javax.inject.Inject
 @HiltViewModel
 class BluetoothViewModel @Inject constructor(
     private val bluetoothController: BluetoothController,
-    private val _securityAlert: MutableStateFlow<SecurityAlert?> = MutableStateFlow<SecurityAlert?>(null),
-    val securityAlert: StateFlow<SecurityAlert?> = _securityAlert.asStateFlow()
+
 ): ViewModel() {
+    private val _securityAlert = MutableStateFlow<SecurityAlert?>(null)
+    val securityAlert: StateFlow<SecurityAlert?> = _securityAlert.asStateFlow()
 
     private val _state = MutableStateFlow(BluetoothUiState())
     val state = combine(
@@ -125,21 +129,43 @@ class BluetoothViewModel @Inject constructor(
         super.onCleared()
         bluetoothController.release()
     }
-    fun onSecurityAlert(attackType: String, deviceName: String, message: String) {
-        val also1 = SecurityAlert(
-            attackType = attackType,
-            deviceName = deviceName,
-            message = message
-        ).also { val also = it.also { _securityAlert.value = it } }
+    fun onSecurityAlert(alert: SecurityAlert) {
+        _securityAlert.value = alert
     }
 
     fun clearSecurityAlert() {
         _securityAlert.value = null
     }
+    enum class AttackType { SPOOFING, INJECTION, FLOODING,None }
 
-    data class SecurityAlert(
-        val attackType: String,
-        val deviceName: String,
-        val message: String
-    )
+    suspend fun simulateAttack(type: AttackType) {
+        when (type) {
+            AttackType.SPOOFING -> simulateSpoofing()
+            AttackType.INJECTION -> simulateInjection()
+            AttackType.FLOODING -> simulateFlooding()
+            AttackType.None -> return
+        }
+    }
+
+    private suspend fun simulateSpoofing() {
+        val message = "URGENT: Your account will be locked! Click http://malicious.link"
+        bluetoothController.trySendMessage(message)
+        // This will trigger IDS detection on receiver
+    }
+
+    private suspend fun simulateInjection() {
+        val message = "ADMIN COMMAND: {malicious: payload, exploit: true}"
+        bluetoothController.trySendMessage(message)
+    }
+
+    private suspend fun simulateFlooding() {
+        repeat(50) {
+            bluetoothController.trySendMessage("FLOOD_${System.currentTimeMillis()}")
+            delay(100)
+        }
+    }
+    fun blockDevice(deviceAddress: String) {
+        // Implementation to block the device
+    }
+
 }

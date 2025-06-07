@@ -2,11 +2,11 @@ package com.plcoding.bluetoothchat.di
 
 import android.app.Application
 import androidx.room.Room
-import com.plcoding.bluetoothchat.data.chat.AndroidBluetoothController
-import com.plcoding.bluetoothchat.data.chat.AppDatabase
-import com.plcoding.bluetoothchat.data.chat.MessageLogDao
+import com.plcoding.bluetoothchat.data.chat.*
 import com.plcoding.bluetoothchat.domain.chat.BluetoothController
 import com.plcoding.bluetoothchat.presentation.BluetoothViewModel
+import com.plcoding.bluetoothchat.presentation.IDS.BluetoothFeatureExtractor
+import com.plcoding.bluetoothchat.presentation.SecurityAlert
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -21,14 +21,12 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 object AppModule {
 
-    // ✅ Provide BluetoothController as before
     @Provides
     @Singleton
     fun provideBluetoothController(app: Application): BluetoothController {
         return AndroidBluetoothController(app)
     }
 
-    // ✅ Provide Room Database
     @Provides
     @Singleton
     fun provideAppDatabase(app: Application): AppDatabase {
@@ -39,26 +37,25 @@ object AppModule {
         ).build()
     }
 
-    // ✅ Provide DAO
     @Provides
     @Singleton
     fun provideMessageLogDao(database: AppDatabase): MessageLogDao {
         return database.messageLogDao()
     }
+
+    @Provides
+    @Singleton
+    fun provideBluetoothFeatureExtractor(): BluetoothFeatureExtractor {
+        return BluetoothFeatureExtractor()
+    }
 }
+
 @Module
 @InstallIn(ViewModelComponent::class)
 object ViewModelModule {
 
     @Provides
-    fun provideSecurityAlertMutableStateFlow(): MutableStateFlow<BluetoothViewModel.SecurityAlert?> {
+    fun provideSecurityAlertState(): MutableStateFlow<SecurityAlert?> {
         return MutableStateFlow(null)
-    }
-
-    @Provides
-    fun provideSecurityAlertStateFlow(
-        mutableFlow: MutableStateFlow<BluetoothViewModel.SecurityAlert?>
-    ): StateFlow<BluetoothViewModel.SecurityAlert?> {
-        return mutableFlow.asStateFlow()
     }
 }

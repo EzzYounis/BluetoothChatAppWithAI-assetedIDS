@@ -1,7 +1,8 @@
 package com.plcoding.bluetoothchat.data.chat
 
-import IDS.BluetoothFeatureExtractor
-import IDS.IDSModelHelper
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -12,17 +13,15 @@ import android.os.Environment
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.plcoding.bluetoothchat.domain.chat.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import com.plcoding.bluetoothchat.presentation.IDS.BluetoothFeatureExtractor
+import com.plcoding.bluetoothchat.presentation.IDS.IDSModel
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.nio.FloatBuffer
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
@@ -30,17 +29,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 class BluetoothDataTransferService(
     private val context: Context,
     private val socket: BluetoothSocket,
-    private val messageLogDao: MessageLogDao? = null, // Optional Room integration
-    private val idsModel: IDSModelHelper = IDSModelHelper(context),
-    private val featureExtractor: BluetoothFeatureExtractor = BluetoothFeatureExtractor(),
+    private val messageLogDao: MessageLogDao? = null,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-
-
 ) {
-    // File logging configuration - now using txt extension and simplified path
+    // File logging configuration
     private val logDirectory by lazy {
-        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "BluetoothChatLogs").apply {
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            "BluetoothChatLogs").apply {
             if (!exists()) mkdirs()
         }
     }
@@ -48,6 +43,27 @@ class BluetoothDataTransferService(
         File(logDirectory, "bluetooth_messages_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt")
     }
     private val isLoggingEnabled = AtomicBoolean(true)
+
+    // IDS Components
+    private val featureExtractor = BluetoothFeatureExtractor()
+    private lateinit var idsModel: IDSModel
+    private val modelInitialized = AtomicBoolean(false)
+
+    init {
+        initIDSModel()
+    }
+
+    private fun initIDSModel() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                idsModel = IDSModel(context)
+                modelInitialized.set(true)
+                Log.d("IDS", "Intrusion Detection Model loaded successfully")
+            } catch (e: Exception) {
+                Log.e("IDS", "Failed to initialize IDS model", e)
+            }
+        }
+    }
 
     @SuppressLint("MissingPermission")
     fun listenForIncomingMessages(): Flow<BluetoothMessage> = flow {
@@ -64,23 +80,27 @@ class BluetoothDataTransferService(
             val remoteDevice = socket.remoteDevice
             val message = BluetoothMessage(
                 message = messageText,
-                senderName = socket.remoteDevice.name ?: "Unknown",
+                senderName = remoteDevice.name ?: "Unknown",
                 isFromLocalUser = false
             )
 
             logMessage(
-                fromDevice = socket.remoteDevice.name ?: "Unknown",
+                fromDevice = remoteDevice.name ?: "Unknown",
                 toDevice = BluetoothAdapter.getDefaultAdapter()?.name ?: "Local",
                 message = messageText,
                 direction = "INCOMING"
             )
-            scope.launch {
-                detectIntrusion(
-                    message = messageText,
-                    device = remoteDevice.address,
-                    deviceName = remoteDevice.name ?: "Unknown",
-                    direction = "INCOMING"
-                )
+
+            if (modelInitialized.get()) {
+                scope.launch {
+                    detectIntrusion(
+                        message = messageText,
+                        device = remoteDevice.address,
+                        deviceName = remoteDevice.name ?: "Unknown",
+                        direction = "INCOMING",
+                        timestamp = System.currentTimeMillis()
+                    )
+                }
             }
 
             emit(message)
@@ -91,23 +111,26 @@ class BluetoothDataTransferService(
     suspend fun sendMessage(bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
         try {
             socket.outputStream.write(bytes)
-            val message =     bytes.decodeToString()
+            val message = bytes.decodeToString()
             val remoteDevice = socket.remoteDevice
-
 
             logMessage(
                 fromDevice = BluetoothAdapter.getDefaultAdapter()?.name ?: "Local",
-                toDevice = socket.remoteDevice.name ?: "Unknown",
+                toDevice = remoteDevice.name ?: "Unknown",
                 message = message,
                 direction = "OUTGOING"
             )
-            scope.launch {
-                detectIntrusion(
-                    message = message,
-                    device = remoteDevice.address,
-                    deviceName = remoteDevice.name ?: "Unknown",
-                    direction = "OUTGOING"
-                )
+
+            if (modelInitialized.get()) {
+                scope.launch {
+                    detectIntrusion(
+                        message = message,
+                        device = remoteDevice.address,
+                        deviceName = remoteDevice.name ?: "Unknown",
+                        direction = "OUTGOING",
+                        timestamp = System.currentTimeMillis()
+                    )
+                }
             }
 
             true
@@ -116,29 +139,42 @@ class BluetoothDataTransferService(
             false
         }
     }
+
     private suspend fun detectIntrusion(
         message: String,
         device: String,
         deviceName: String,
-        direction: String
+        direction: String,
+        timestamp: Long
     ) {
         try {
-            val features = featureExtractor.extractFeatures(
+            val bluetoothMessage = BluetoothFeatureExtractor.BluetoothMessage(
+                timestamp = timestamp,
+                fromDevice = if (direction == "INCOMING") deviceName else "Local",
+                toDevice = if (direction == "INCOMING") "Local" else deviceName,
                 message = message,
-                timestamp = System.currentTimeMillis(),
-                device = device,
-                direction = direction
+                direction = if (direction == "INCOMING")
+                    BluetoothFeatureExtractor.BluetoothMessage.Direction.INCOMING
+                else
+                    BluetoothFeatureExtractor.BluetoothMessage.Direction.OUTGOING
             )
 
-            idsModel.predict(features)?.let { (prediction, _) ->
-                if (prediction != "normal") {
-                    notifySecurityAlert(prediction, message, device, deviceName)
-                }
+            val features = featureExtractor.extractFeatures(bluetoothMessage)
+            val prediction = idsModel.predict(features)
+
+            if (prediction != "normal") {
+                notifySecurityAlert(
+                    attackType = prediction,
+                    message = message,
+                    deviceAddress = device,
+                    deviceName = deviceName
+                )
             }
         } catch (e: Exception) {
-            Log.e("BluetoothIDS", "Intrusion detection failed", e)
+            Log.e("IDS", "Intrusion detection failed", e)
         }
     }
+
     private fun notifySecurityAlert(
         attackType: String,
         message: String,
@@ -151,8 +187,9 @@ class BluetoothDataTransferService(
             putExtra("DEVICE_ADDRESS", deviceAddress)
             putExtra("DEVICE_NAME", deviceName)
         }
-        context.sendBroadcast(intent) // Regular broadcast instead of local
+        ContextCompat.startForegroundService(context, intent)
     }
+
     private suspend fun logMessage(
         fromDevice: String,
         toDevice: String,
@@ -166,7 +203,6 @@ class BluetoothDataTransferService(
             val dateTime = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
                 .format(Date(timestamp))
 
-            // Format the log entry with simplified structure
             val logEntry = """
                 [$dateTime] $direction
                 From: $fromDevice
@@ -175,16 +211,13 @@ class BluetoothDataTransferService(
                 
                 """.trimIndent()
 
-            // Write to txt file
             logFile.appendText(logEntry)
 
-            // Optional: Save to Room database
             messageLogDao?.insertMessage(
                 MessageLog(
                     fromDevice = fromDevice,
                     toDevice = toDevice,
-                    message = if (message.length > 500)
-                        message.take(500) + "..." else message,
+                    message = if (message.length > 500) message.take(500) + "..." else message,
                     timestamp = timestamp
                 )
             )
@@ -193,7 +226,6 @@ class BluetoothDataTransferService(
         }
     }
 
-    // File management utilities
     fun getLogFiles(): List<File> = logDirectory.listFiles()
         ?.filter { it.name.startsWith("bluetooth_messages_") && it.name.endsWith(".txt") }
         ?.sortedByDescending { it.lastModified() }
@@ -222,9 +254,12 @@ class BluetoothDataTransferService(
     fun enableLogging(enable: Boolean) {
         isLoggingEnabled.set(enable)
     }
+
     fun close() {
         scope.cancel()
-        idsModel.shutdown()
+        if (modelInitialized.get()) {
+            idsModel.close()
+        }
     }
 
     companion object {

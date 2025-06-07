@@ -20,29 +20,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.material.ButtonDefaults
-import androidx.compose.material.CircularProgressIndicator
-import androidx.compose.material.MaterialTheme
-import androidx.compose.material.Surface
-import androidx.compose.material.Text
-import androidx.compose.material.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.material.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.plcoding.bluetoothchat.presentation.components.ChatScreen
 import com.plcoding.bluetoothchat.presentation.components.DeviceScreen
-import com.plcoding.bluetoothchat.presentation.components.SecurityAlertDialog
 import com.plcoding.bluetoothchat.ui.theme.BluetoothChatTheme
 import dagger.hilt.android.AndroidEntryPoint
-import androidx.compose.material.AlertDialog as AlertDialog1
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -63,7 +51,7 @@ class MainActivity : ComponentActivity() {
 
         val enableBluetoothLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
-        ) { /* Not needed */ }
+        ) { /* No action needed */ }
 
         val permissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
@@ -95,28 +83,39 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 val securityAlert by viewModel.securityAlert.collectAsState()
 
-                SecurityAlertHandler(viewModel)
+                // Handle security alerts
                 DisposableEffect(Unit) {
                     val receiver = object : BroadcastReceiver() {
                         override fun onReceive(context: Context, intent: Intent) {
                             if (intent.action == "SECURITY_ALERT") {
+                                val attackType = intent.getStringExtra("ATTACK_TYPE") ?: "unknown"
+                                val deviceName = intent.getStringExtra("DEVICE_NAME") ?: "Unknown"
+                                val deviceAddress = intent.getStringExtra("DEVICE_ADDRESS") ?: "00:00:00:00:00:00"
+                                val message = intent.getStringExtra("MESSAGE") ?: ""
+
                                 viewModel.onSecurityAlert(
-                                    intent.getStringExtra("ATTACK_TYPE") ?: "unknown",
-                                    intent.getStringExtra("DEVICE_NAME") ?: "Unknown",
-                                    intent.getStringExtra("MESSAGE") ?: ""
+                                    SecurityAlert(
+                                        attackType = attackType,
+                                        deviceName = deviceName,
+                                        deviceAddress = deviceAddress,
+                                        message = message
+                                    )
                                 )
                             }
                         }
                     }
-                    context.registerReceiver(receiver,
+                    context.registerReceiver(
+                        receiver,
                         IntentFilter("SECURITY_ALERT"),
-                        android.content.Context.RECEIVER_NOT_EXPORTED)
+                        RECEIVER_NOT_EXPORTED
+                    )
 
                     onDispose {
                         context.unregisterReceiver(receiver)
                     }
                 }
 
+                // Show error messages
                 LaunchedEffect(key1 = state.errorMessage) {
                     state.errorMessage?.let { message ->
                         Toast.makeText(
@@ -127,6 +126,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Show connection success
                 LaunchedEffect(key1 = state.isConnected) {
                     if(state.isConnected) {
                         Toast.makeText(
@@ -137,72 +137,97 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Surface(
-                    color = MaterialTheme.colors.background
-                ) {Box(modifier = Modifier.fillMaxSize()){
-                    when {
-                        state.isConnecting -> {
-                            Column(
-                                modifier = Modifier.fillMaxSize(),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                CircularProgressIndicator()
-                                Text(text = "Connecting...")
+                Surface(color = MaterialTheme.colors.background) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        when {
+                            state.isConnecting -> {
+                                ConnectingScreen()
+                            }
+                            state.isConnected -> {
+                                ChatScreen(
+                                    state = state,
+                                    onDisconnect = viewModel::disconnectFromDevice,
+                                    onSendMessage = viewModel::sendMessage,
+                                    viewModel = viewModel
+                                )
+                            }
+                            else -> {
+                                DeviceScreen(
+                                    state = state,
+                                    onStartScan = viewModel::startScan,
+                                    onStopScan = viewModel::stopScan,
+                                    onDeviceClick = viewModel::connectToDevice,
+                                    onStartServer = viewModel::waitForIncomingConnections
+                                )
                             }
                         }
-                        state.isConnected -> {
-                            ChatScreen(
-                                state = state,
-                                onDisconnect = viewModel::disconnectFromDevice,
-                                onSendMessage = viewModel::sendMessage
-                            )
-                        }
-                        else -> {
-                            DeviceScreen(
-                                state = state,
-                                onStartScan = viewModel::startScan,
-                                onStopScan = viewModel::stopScan,
-                                onDeviceClick = viewModel::connectToDevice,
-                                onStartServer = viewModel::waitForIncomingConnections
+
+                        // Security Alert Dialog
+                        securityAlert?.let { alert ->
+                            SecurityAlertDialog(
+                                alert = alert,
+                                onDismiss = { viewModel.clearSecurityAlert() },
+                                onBlockDevice = {
+                                    viewModel.blockDevice(alert.deviceAddress)
+                                    viewModel.clearSecurityAlert()
+                                }
                             )
                         }
                     }
-                    securityAlert?.let { alert ->
-                        AlertDialog1(
-                            onDismissRequest = { viewModel.clearSecurityAlert() },
-                            title = {
-                                Text(
-                                    "Security Alert - ${alert.attackType.replaceFirstChar { it.uppercase() }}",
-                                    color = MaterialTheme.colors.error
-                                )
-                            },
-                            text = {
-                                Column {
-                                    Text("Device: ${alert.deviceName}")
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text("Message: ${alert.message.take(200)}")
-                                }
-                            },
-                            confirmButton = {
-                                TextButton(onClick = { viewModel.clearSecurityAlert() }) {
-                                    Text("OK")
-                                }
-                            },
-                            dismissButton = {
-                                TextButton(
-                                    onClick = { /* Handle block */ },
-                                    colors = ButtonDefaults.textButtonColors(
-                                        contentColor = MaterialTheme.colors.error
-                                    )
-                                ) {
-                                    Text("BLOCK DEVICE")
-                                }
-                            }
-                        )
                 }
-                } }
             }
         }
     }
+}
+
+@Composable
+fun ConnectingScreen() {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        CircularProgressIndicator()
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(text = "Connecting...")
+    }
+}
+
+@Composable
+fun SecurityAlertDialog(
+    alert: SecurityAlert,
+    onDismiss: () -> Unit,
+    onBlockDevice: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "Security Alert - ${alert.attackType.replaceFirstChar { it.uppercase() }}",
+                color = MaterialTheme.colors.error
+            )
+        },
+        text = {
+            Column {
+                Text("Device: ${alert.deviceName} (${alert.deviceAddress})")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Message: ${alert.message.take(200)}")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("DISMISS")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onBlockDevice,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colors.error
+                )
+            ) {
+                Text("BLOCK DEVICE")
+            }
+        }
+    )
 }
