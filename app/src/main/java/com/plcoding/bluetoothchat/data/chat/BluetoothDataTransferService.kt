@@ -66,7 +66,7 @@ class BluetoothDataTransferService(
     private fun testIDSSystem() {
         scope.launch(Dispatchers.IO) {
             try {
-                val testResults = idsModel.testDetection()
+                val testResults = idsModel.runTestCases()
                 Log.d("IDS", "=== IDS Test Results ===")
                 testResults.forEach { (message, result) ->
                     Log.d("IDS", "Message: '$message' -> Attack: ${result.isAttack}, Type: ${result.attackType}, Confidence: ${result.confidence}")
@@ -124,7 +124,7 @@ class BluetoothDataTransferService(
                                 Your message was blocked due to security concerns
                                 Attack Type: ${detectionResult.attackType}
                                 Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%
-                                Detection Method: ${if (detectionResult.aiDetected) "AI Analysis" else "Rule-based"}
+                                Detection Method: ${if (detectionResult.isAttack) "AI Analysis" else "Rule-based"}
                                 Reason: ${detectionResult.explanation}
                             """.trimIndent()
 
@@ -183,7 +183,7 @@ class BluetoothDataTransferService(
                 deviceName = device?.name ?: "Unknown",
                 deviceAddress = device?.address ?: "Unknown",
                 message = message,
-                detectionMethod = if (result.aiDetected) "AI Model" else "Rule-based",
+                detectionMethod = if (result.isAttack) "AI Model" else "Rule-based",
                 explanation = result.explanation
             )
         )
@@ -210,18 +210,8 @@ class BluetoothDataTransferService(
                 direction = "OUTGOING"
             )
 
-            // Perform IDS analysis before sending - Always perform now
-            val detectionResult = idsModel.analyzeMessage(messageText)
-            Log.d("IDS", "Outgoing message analysis: isAttack=${detectionResult.isAttack}, type=${detectionResult.attackType}")
-
-            if (detectionResult.isAttack) {
-                Log.w("IDS", "🚨 OUTGOING ATTACK BLOCKED! Type: ${detectionResult.attackType}")
-                handleSecurityAlert(detectionResult, messageText)
-                if (shouldBlockMessage(detectionResult)) {
-                    Log.w("BluetoothTransfer", "Message blocked by IDS: ${detectionResult.attackType}")
-                    return@withContext false
-                }
-            }
+            // DO NOT analyze outgoing messages - just send them
+            // Remove all IDS analysis code from here
 
             // Send the message with proper encoding
             socket.outputStream.write(bytes)

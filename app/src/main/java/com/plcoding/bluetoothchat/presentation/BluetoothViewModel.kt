@@ -248,7 +248,7 @@ class BluetoothViewModel @Inject constructor(
     fun testIDSSystem() {
         viewModelScope.launch {
             Log.d("ViewModel", "Testing IDS system...")
-            val testResults = idsModel.testDetection()
+            val testResults = idsModel.runTestCases()
 
             Log.d("ViewModel", "=== IDS Test Results ===")
             testResults.forEach { (message, result) ->
@@ -275,8 +275,8 @@ class BluetoothViewModel @Inject constructor(
                     🔍 Manual Analysis Result:
                     🚨 Attack Type: ${result.attackType}
                     📊 Confidence: ${String.format("%.1f", result.confidence * 100)}%
-                    🤖 Detection: ${if (result.aiDetected) "AI Model" else "Rule-based"}
-                    📝 Pattern: ${result.matchedPattern}
+                    🤖 Detection: ${if (result.isAttack) "AI Model" else "Rule-based"}
+                    📝 Pattern: ${result.patternMatch}
                     ℹ️ ${result.explanation}
                 """.trimIndent()
             }
