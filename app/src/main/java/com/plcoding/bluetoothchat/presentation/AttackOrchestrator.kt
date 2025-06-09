@@ -27,7 +27,7 @@ class AttackOrchestrator(
             SPOOFING -> simulateSpoofing()
             BluetoothViewModel.AttackType.INJECTION -> simulateInjection()
             BluetoothViewModel.AttackType.FLOODING -> simulateFlooding()
-            BluetoothViewModel.AttackType.None -> return
+            BluetoothViewModel.AttackType.NONE -> return
         }
     }
 

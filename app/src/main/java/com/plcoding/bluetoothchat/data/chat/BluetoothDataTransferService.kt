@@ -51,24 +51,29 @@ class BluetoothDataTransferService(
 
     // IDS Components
     private val featureExtractor = BluetoothFeatureExtractor()
-    private lateinit var idsModel: IDSModel
-    private val modelInitialized = AtomicBoolean(false)
+    private val idsModel: IDSModel = IDSModel(context)
+    private val modelInitialized = AtomicBoolean(true)
 
     // Message channel for proper flow handling
     private val messageChannel = Channel<BluetoothMessage>(Channel.UNLIMITED)
 
     init {
-        initIDSModel()
+        Log.d("IDS", "Intrusion Detection System initialized successfully")
+        // Test the IDS on initialization
+        testIDSSystem()
     }
 
-    private fun initIDSModel() {
+    private fun testIDSSystem() {
         scope.launch(Dispatchers.IO) {
             try {
-                idsModel = IDSModel(context)
-                modelInitialized.set(true)
-                Log.d("IDS", "Intrusion Detection Model loaded successfully")
+                val testResults = idsModel.testDetection()
+                Log.d("IDS", "=== IDS Test Results ===")
+                testResults.forEach { (message, result) ->
+                    Log.d("IDS", "Message: '$message' -> Attack: ${result.isAttack}, Type: ${result.attackType}, Confidence: ${result.confidence}")
+                }
+                Log.d("IDS", "=== End IDS Test ===")
             } catch (e: Exception) {
-                Log.e("IDS", "Failed to initialize IDS model", e)
+                Log.e("IDS", "IDS test failed", e)
             }
         }
     }
@@ -104,28 +109,33 @@ class BluetoothDataTransferService(
 
                     var detectionResult: IDSModel.AnalysisResult? = null
 
-                    // IDS Analysis
-                    if (modelInitialized.get()) {
-                        detectionResult = idsModel.analyzeMessage(messageText)
+                    // IDS Analysis - Always perform since model is now initialized immediately
+                    detectionResult = idsModel.analyzeMessage(messageText)
+                    Log.d("IDS", "Detection result for '$messageText': isAttack=${detectionResult.isAttack}, type=${detectionResult.attackType}")
 
-                        if (detectionResult.isAttack) {
-                            handleSecurityAlert(detectionResult, messageText)
+                    if (detectionResult.isAttack) {
+                        Log.w("IDS", "🚨 ATTACK DETECTED! Type: ${detectionResult.attackType}, Confidence: ${detectionResult.confidence}")
+                        handleSecurityAlert(detectionResult, messageText)
 
-                            // Send alert back to sender
-                            try {
-                                val alertMsg = """
-                                    [SECURITY ALERT]
-                                    Your message was blocked
-                                    Reason: ${detectionResult.attackType}
-                                    Detected by: ${if (detectionResult.aiDetected) "AI" else "rules"}
-                                """.trimIndent()
+                        // Send alert back to sender
+                        try {
+                            val alertMsg = """
+                                [🚨 SECURITY ALERT 🚨]
+                                Your message was blocked due to security concerns
+                                Attack Type: ${detectionResult.attackType}
+                                Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%
+                                Detection Method: ${if (detectionResult.aiDetected) "AI Analysis" else "Rule-based"}
+                                Reason: ${detectionResult.explanation}
+                            """.trimIndent()
 
-                                socket.outputStream.write(alertMsg.toByteArray(Charsets.UTF_8))
-                                socket.outputStream.flush()
-                            } catch (e: Exception) {
-                                Log.e("BluetoothService", "Failed to send security alert", e)
-                            }
+                            socket.outputStream.write(alertMsg.toByteArray(Charsets.UTF_8))
+                            socket.outputStream.flush()
+                            Log.d("IDS", "Security alert sent to remote device")
+                        } catch (e: Exception) {
+                            Log.e("BluetoothService", "Failed to send security alert", e)
                         }
+                    } else {
+                        Log.d("IDS", "✅ Message passed security check")
                     }
 
                     val message = BluetoothMessage(
@@ -200,15 +210,16 @@ class BluetoothDataTransferService(
                 direction = "OUTGOING"
             )
 
-            // Perform IDS analysis before sending
-            if (modelInitialized.get()) {
-                val detectionResult = idsModel.analyzeMessage(messageText)
-                if (detectionResult.isAttack) {
-                    handleSecurityAlert(detectionResult, messageText)
-                    if (shouldBlockMessage(detectionResult)) {
-                        Log.w("BluetoothTransfer", "Message blocked by IDS: ${detectionResult.attackType}")
-                        return@withContext false
-                    }
+            // Perform IDS analysis before sending - Always perform now
+            val detectionResult = idsModel.analyzeMessage(messageText)
+            Log.d("IDS", "Outgoing message analysis: isAttack=${detectionResult.isAttack}, type=${detectionResult.attackType}")
+
+            if (detectionResult.isAttack) {
+                Log.w("IDS", "🚨 OUTGOING ATTACK BLOCKED! Type: ${detectionResult.attackType}")
+                handleSecurityAlert(detectionResult, messageText)
+                if (shouldBlockMessage(detectionResult)) {
+                    Log.w("BluetoothTransfer", "Message blocked by IDS: ${detectionResult.attackType}")
+                    return@withContext false
                 }
             }
 

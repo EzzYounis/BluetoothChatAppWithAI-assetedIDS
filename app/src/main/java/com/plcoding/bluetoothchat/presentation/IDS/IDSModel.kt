@@ -1,177 +1,219 @@
-// presentation/IDS/IDSModel.kt
 package com.plcoding.bluetoothchat.presentation.IDS
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.util.Log
-import java.nio.FloatBuffer
-import java.util.*
-import java.util.Collections
-import kotlin.math.max
+import java.util.regex.Pattern
 
-class IDSModel(context: Context) {
-    private val ortEnv = OrtEnvironment.getEnvironment()
-    private val featureCount = 22 // Must match your model's input features
-    val modelName = "BluetoothThreat-v3.1"
-    private lateinit var ortSession: OrtSession
+class IDSModel(private val context: Context) {
+    val modelName = "Bluetooth Security IDS v1.0"
+
+    // Rule-based detection patterns
+    private val attackPatterns = mapOf(
+        "SPOOFING" to listOf(
+            Pattern.compile("(?i)(urgent|click|link|account|suspended|verify|login)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("(?i)(http://|https://|www\\.|ftp://)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("(?i)(password|username|credit card|ssn|social security)", Pattern.CASE_INSENSITIVE)
+        ),
+        "INJECTION" to listOf(
+            Pattern.compile("\\{.*[\"'].*:.*[\"'].*\\}", Pattern.CASE_INSENSITIVE), // JSON-like structures
+            Pattern.compile("(?i)(admin|root|system|command|execute|payload)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("[<>\"'%;()&+]", Pattern.CASE_INSENSITIVE), // Special characters
+            Pattern.compile("(?i)(script|eval|exec|shell|cmd)", Pattern.CASE_INSENSITIVE)
+        ),
+        "FLOODING" to listOf(
+            Pattern.compile("^FLOOD_\\d+$", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("^(.{1,10})\\1{5,}$", Pattern.CASE_INSENSITIVE), // Repeated patterns
+            Pattern.compile("^[A-Z0-9_]{20,}$", Pattern.CASE_INSENSITIVE) // Long uppercase/number strings
+        )
+    )
+
+    // Message frequency tracking for flood detection
+    private val messageHistory = mutableListOf<Long>()
+    private val maxMessagesPerSecond = 5
+    private val historyWindowMs = 1000L
 
     data class AnalysisResult(
         val isAttack: Boolean,
         val attackType: String,
-        val aiDetected: Boolean,
-        val matchedPattern: String,
-        val explanation: String
+        val confidence: Double,
+        val aiDetected: Boolean = false,
+        val explanation: String,
+        val matchedPattern: String = ""
     )
 
-    init {
-        try {
-            context.assets.open("bluetooth_ids_model.onnx").use { inputStream ->
-                val modelBytes = inputStream.readBytes()
-                ortSession = ortEnv.createSession(modelBytes)
-            }
-        } catch (e: Exception) {
-            Log.e("IDSModel", "ONNX model loading failed", e)
-            throw RuntimeException("Failed to load ONNX model: ${e.message}", e)
-
-        }
-    }
-
     fun analyzeMessage(message: String): AnalysisResult {
-        // Rule-based detection first
-        val ruleBasedResult = detectWithRules(message)
-        if (ruleBasedResult != null) return ruleBasedResult
+        Log.d("IDS", "Analyzing message: '$message'")
 
-        // AI model detection
-        return detectWithAI(message)
-    }
+        // Clean up message history (remove old entries)
+        val currentTime = System.currentTimeMillis()
+        messageHistory.removeAll { currentTime - it > historyWindowMs }
 
+        // Add current message timestamp
+        messageHistory.add(currentTime)
 
-    private fun detectWithRules(message: String): AnalysisResult? {
-        return when {
-            isSpoofing(message) -> AnalysisResult(
+        // Check for flooding first
+        if (messageHistory.size > maxMessagesPerSecond) {
+            Log.w("IDS", "FLOODING detected - ${messageHistory.size} messages in ${historyWindowMs}ms")
+            return AnalysisResult(
                 isAttack = true,
-                attackType = "spoofing",
+                attackType = "FLOODING",
+                confidence = 0.95,
                 aiDetected = false,
-                matchedPattern = "Malicious URL/Content",
-                explanation = "Contains phishing attempt"
+                explanation = "Message flooding detected: ${messageHistory.size} messages in ${historyWindowMs/1000} second(s)",
+                matchedPattern = "Message frequency > $maxMessagesPerSecond/sec"
             )
-
-            isInjection(message) -> AnalysisResult(
-                isAttack = true,
-                attackType = "injection",
-                aiDetected = false,
-                matchedPattern = "Malicious Syntax",
-                explanation = "Contains code injection pattern"
-            )
-
-            isFlooding(message) -> AnalysisResult(
-                isAttack = true,
-                attackType = "flooding",
-                aiDetected = false,
-                matchedPattern = "Message Flood",
-                explanation = "High frequency or large message size"
-            )
-
-            else -> null
         }
-    }
 
-    private fun isSpoofing(message: String): Boolean {
-        return message.contains(Regex("http://|https://")) ||
-                message.contains("click here", ignoreCase = true) ||
-                message.contains("urgent", ignoreCase = true)
-    }
+        // Check rule-based patterns
+        for ((attackType, patterns) in attackPatterns) {
+            for ((index, pattern) in patterns.withIndex()) {
+                val matcher = pattern.matcher(message)
+                if (matcher.find()) {
+                    val matchedText = matcher.group()
+                    Log.w("IDS", "$attackType attack detected - Pattern: ${pattern.pattern()}, Match: '$matchedText'")
 
-    private fun isInjection(message: String): Boolean {
-        return message.contains("' OR") ||
-                message.contains("{malicious:") ||
-                message.contains("ADMIN COMMAND")
-    }
+                    return AnalysisResult(
+                        isAttack = true,
+                        attackType = attackType,
+                        confidence = calculateConfidence(attackType, message, matchedText),
+                        aiDetected = false,
+                        explanation = getExplanation(attackType, matchedText),
+                        matchedPattern = "Pattern ${index + 1}: ${pattern.pattern()}"
+                    )
+                }
+            }
+        }
 
-    private fun isFlooding(message: String): Boolean {
-        return message.length > 500 ||
-                message.split(" ").size > 100
-    }
+        // Additional heuristic checks
+        val heuristicResult = performHeuristicAnalysis(message)
+        if (heuristicResult.isAttack) {
+            Log.w("IDS", "Heuristic detection: ${heuristicResult.attackType}")
+            return heuristicResult
+        }
 
-    private fun detectWithAI(message: String): AnalysisResult {
-        val features = extractFeatures(message)
-        val inputTensor = OnnxTensor.createTensor(
-            ortEnv,
-            FloatBuffer.wrap(features),
-            longArrayOf(1, features.size.toLong())
+        Log.d("IDS", "Message appears safe")
+        return AnalysisResult(
+            isAttack = false,
+            attackType = "NONE",
+            confidence = 0.0,
+            aiDetected = false,
+            explanation = "Message passed all security checks",
+            matchedPattern = ""
         )
+    }
 
-        val output = ortSession.run(Collections.singletonMap("float_input", inputTensor))
-        val prediction = processOutput(output)
-        val confidence = getConfidence(output)
+    private fun performHeuristicAnalysis(message: String): AnalysisResult {
+        val suspiciousScore = calculateSuspiciousScore(message)
+
+        if (suspiciousScore > 0.7) {
+            val attackType = when {
+                message.contains("http", ignoreCase = true) ||
+                        message.contains("click", ignoreCase = true) -> "SPOOFING"
+                message.contains("{") && message.contains("}") -> "INJECTION"
+                message.length > 100 && message.count { it.isUpperCase() } > message.length / 2 -> "FLOODING"
+                else -> "SUSPICIOUS"
+            }
+
+            return AnalysisResult(
+                isAttack = true,
+                attackType = attackType,
+                confidence = suspiciousScore,
+                aiDetected = true,
+                explanation = "Heuristic analysis detected suspicious content (score: ${String.format("%.2f", suspiciousScore)})",
+                matchedPattern = "Heuristic analysis"
+            )
+        }
 
         return AnalysisResult(
-            isAttack = prediction != "normal",
-            attackType = prediction,
-            aiDetected = true,
-            matchedPattern = "AI-detected anomaly",
-            explanation = "Model confidence: ${"%.1f".format(confidence * 100)}%"
+            isAttack = false,
+            attackType = "NONE",
+            confidence = 0.0,
+            aiDetected = false,
+            explanation = "Heuristic analysis passed",
+            matchedPattern = ""
         )
     }
 
-    private fun extractFeatures(message: String): FloatArray {
-        // Implement your feature extraction logic
-        return FloatArray(featureCount).apply {
-            // Example features - replace with your actual feature extraction
-            this[0] = message.length.toFloat()              // Message length
-            this[1] = message.split(" ").size.toFloat()     // Word count
-            this[2] = if (isSpoofing(message)) 1f else 0f   // Spoofing flag
-            this[3] = if (isInjection(message)) 1f else 0f  // Injection flag
-            // ... add all 22 features
-        }
-    }
+    private fun calculateSuspiciousScore(message: String): Double {
+        var score = 0.0
 
-    private fun processOutput(output: OrtSession.Result): String {
-        return when (val rawOutput = output?.get(0)?.value) {
-            is Array<*> -> CLASS_LABELS[(rawOutput.first() as FloatArray).indices.maxBy {
-                (rawOutput.first() as FloatArray)[it]
-            }]
+        // Check for suspicious keywords
+        val suspiciousKeywords = listOf(
+            "urgent", "click", "verify", "suspended", "account", "login",
+            "password", "admin", "root", "command", "payload", "exploit"
+        )
 
-            is Long -> CLASS_LABELS[rawOutput.toInt()]
-            else -> "unknown"
-        }
-    }
-
-    private fun getConfidence(output: OrtSession.Result): Float {
-        return when (val rawOutput = output?.get(0)?.value) {
-            is Array<*> -> (rawOutput.first() as FloatArray).maxOrNull() ?: 0f
-            else -> 0f
-        }
-    }
-
-    fun close() {
-        ortSession.close()
-    }
-
-    companion object {
-        private val CLASS_LABELS = arrayOf("normal", "flooding", "injection", "spoofing")
-    }
-
-    fun predict(features: FloatArray): String {
-        require(features.size == featureCount) {
-            "Expected $featureCount features, got ${features.size}"
-        }
-
-        return try {
-            val inputBuffer = FloatBuffer.wrap(features)
-            val inputTensor =
-                OnnxTensor.createTensor(ortEnv, inputBuffer, longArrayOf(1, featureCount.toLong()))
-
-            val output = ortSession.run(Collections.singletonMap("float_input", inputTensor))
-            processOutput(output).also {
-                output?.close()
-                inputTensor.close()
+        suspiciousKeywords.forEach { keyword ->
+            if (message.contains(keyword, ignoreCase = true)) {
+                score += 0.1
             }
-        } catch (e: Exception) {
-            "prediction_error: ${e.message}"
+        }
+
+        // Check for URLs
+        if (message.contains("http", ignoreCase = true) ||
+            message.contains("www.", ignoreCase = true)) {
+            score += 0.3
+        }
+
+        // Check for special characters (potential injection)
+        val specialChars = "<>\"'%;()&+{}[]"
+        val specialCharCount = message.count { it in specialChars }
+        if (specialCharCount > 3) {
+            score += 0.2
+        }
+
+        // Check message length and repetition
+        if (message.length > 200) {
+            score += 0.1
+        }
+
+        return minOf(score, 1.0)
+    }
+
+    private fun calculateConfidence(attackType: String, message: String, matchedText: String): Double {
+        return when (attackType) {
+            "SPOOFING" -> when {
+                message.contains("http", ignoreCase = true) -> 0.9
+                message.contains("urgent", ignoreCase = true) -> 0.8
+                else -> 0.7
+            }
+            "INJECTION" -> when {
+                matchedText.contains("{") && matchedText.contains("}") -> 0.95
+                message.contains("admin", ignoreCase = true) -> 0.85
+                else -> 0.75
+            }
+            "FLOODING" -> when {
+                message.startsWith("FLOOD_") -> 0.99
+                else -> 0.8
+            }
+            else -> 0.6
         }
     }
 
+    private fun getExplanation(attackType: String, matchedText: String): String {
+        return when (attackType) {
+            "SPOOFING" -> "Potential phishing or social engineering attempt detected. Suspicious content: '$matchedText'"
+            "INJECTION" -> "Potential code injection or malicious payload detected. Suspicious pattern: '$matchedText'"
+            "FLOODING" -> "Message flooding attack detected. Pattern indicates automated spam: '$matchedText'"
+            else -> "Suspicious content detected: '$matchedText'"
+        }
+    }
+
+    // Method to test the IDS with known attack patterns
+    fun testDetection(): List<Pair<String, AnalysisResult>> {
+        val testMessages = listOf(
+            "URGENT: Your account will be suspended! Click http://malicious.link to verify",
+            "Hello, how are you today?",
+            "ADMIN COMMAND: {execute: true, payload: 'rm -rf /', escalate: admin}",
+            "FLOOD_1234567890",
+            "Normal message with some text",
+            "Please enter your password and username here",
+            "<script>alert('xss')</script>",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )
+
+        return testMessages.map { message ->
+            message to analyzeMessage(message)
+        }
+    }
 }
