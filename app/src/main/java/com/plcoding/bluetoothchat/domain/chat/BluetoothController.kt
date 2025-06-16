@@ -10,6 +10,9 @@ interface BluetoothController {
     val pairedDevices: StateFlow<List<BluetoothDevice>>
     val errors: SharedFlow<String>
 
+    // Add this property to track connected device
+    val connectedDeviceAddress: String?
+
     fun startDiscovery()
     fun stopDiscovery()
 

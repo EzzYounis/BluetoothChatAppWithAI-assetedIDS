@@ -1,34 +1,29 @@
 package com.plcoding.bluetoothchat.presentation
 
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.plcoding.bluetoothchat.data.chat.BluetoothControllerWrapper
 import com.plcoding.bluetoothchat.domain.chat.BluetoothController
 import com.plcoding.bluetoothchat.domain.chat.BluetoothDeviceDomain
 import com.plcoding.bluetoothchat.domain.chat.BluetoothMessage
 import com.plcoding.bluetoothchat.domain.chat.ConnectionResult
 import com.plcoding.bluetoothchat.presentation.IDS.IDSModel
-import com.plcoding.bluetoothchat.presentation.components.SecurityAlertHandler
-import dagger.assisted.Assisted
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import android.util.Log
 import javax.inject.Inject
 
 @HiltViewModel
 class BluetoothViewModel @Inject constructor(
     private val bluetoothController: BluetoothController,
     private val idsModel: IDSModel,
-    private val controllerWrapper: BluetoothControllerWrapper,
     private val savedStateHandle: SavedStateHandle,
-): ViewModel(), SecurityAlertHandler {
-    private val _securityAlert = MutableStateFlow<SecurityAlert?>(null)
-    val securityAlert = _securityAlert.asStateFlow()
+) : ViewModel() {
 
+    // UI State
     private val _state = MutableStateFlow(BluetoothUiState())
     val state = combine(
         bluetoothController.scannedDevices,
@@ -38,42 +33,82 @@ class BluetoothViewModel @Inject constructor(
         state.copy(
             scannedDevices = scannedDevices,
             pairedDevices = pairedDevices,
-            messages = if(state.isConnected) state.messages else emptyList()
+            messages = if (state.isConnected) state.messages else emptyList()
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), _state.value)
 
-    private var deviceConnectionJob: Job? = null
+    // Security Alert State
+    private val _securityAlert = MutableStateFlow<SecurityAlertUI?>(null)
+    val securityAlert = _securityAlert.asStateFlow()
 
     // Detection explanation for UI
     private val _detectionExplanation = MutableStateFlow<String?>(null)
     val detectionExplanation: StateFlow<String?> = _detectionExplanation.asStateFlow()
 
-    init {
-        controllerWrapper.setSecurityAlertCallback { alert ->
-            Log.d("ViewModel", "Security alert received: ${alert.attackType}")
-            _securityAlert.value = alert
+    // Attack notifications from IDS
+    private val _attackNotifications = MutableStateFlow<List<AttackNotificationUI>>(emptyList())
+    val attackNotifications: StateFlow<List<AttackNotificationUI>> = _attackNotifications.asStateFlow()
 
-            // Show detection explanation
-            _detectionExplanation.value = """
-                🚨 Security Alert: ${alert.attackType}
-                🔍 Detection Method: ${alert.detectionMethod}
-                📱 Device: ${alert.deviceName} (${alert.deviceAddress})
-                📝 Message: "${alert.message}"
-                ℹ️ ${alert.explanation}
-            """.trimIndent()
+    private var deviceConnectionJob: Job? = null
+
+    // Data classes for UI
+    data class SecurityAlertUI(
+        val deviceAddress: String,
+        val deviceName: String,
+        val attackType: String,
+        val confidence: Double,
+        val message: String,
+        val explanation: String,
+        val patternMatch: String,
+        val severity: AttackSeverity,
+        val recommendedActions: List<String>,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
+    data class AttackNotificationUI(
+        val id: String = java.util.UUID.randomUUID().toString(),
+        val deviceName: String,
+        val attackType: String,
+        val severity: AttackSeverity,
+        val message: String,
+        val timestamp: Long,
+        val actionTaken: Boolean = false
+    )
+
+    enum class AttackSeverity {
+        LOW, MEDIUM, HIGH, CRITICAL
+    }
+
+    enum class AttackType {
+        SPOOFING,
+        INJECTION,
+        FLOODING,
+        NONE
+    }
+
+    // Get connected device address from controller
+    val connectedDeviceAddress: String?
+        get() = bluetoothController.connectedDeviceAddress
+
+    init {
+        // Subscribe to IDS attack notifications
+        viewModelScope.launch {
+            idsModel.getAttackNotificationFlow().collect { notification ->
+                handleAttackNotification(notification)
+            }
         }
 
+        // Monitor connection state
         bluetoothController.isConnected.onEach { isConnected ->
             _state.update { it.copy(isConnected = isConnected) }
             if (isConnected) {
-                Log.d("ViewModel", "Connected - IDS system is active")
+                Log.d("BluetoothViewModel", "Connected - IDS monitoring active")
             }
         }.launchIn(viewModelScope)
 
+        // Monitor errors
         bluetoothController.errors.onEach { error ->
-            _state.update { it.copy(
-                errorMessage = error
-            ) }
+            _state.update { it.copy(errorMessage = error) }
         }.launchIn(viewModelScope)
     }
 
@@ -102,15 +137,28 @@ class BluetoothViewModel @Inject constructor(
 
     fun sendMessage(message: String) {
         viewModelScope.launch {
-            Log.d("ViewModel", "Sending message: '$message'")
+            Log.d("BluetoothViewModel", "Sending message: '$message'")
+
+            // Analyze outgoing message with IDS
+            val analysis = idsModel.analyzeMessage(
+                message = message,
+                fromDevice = "local",
+                toDevice = connectedDeviceAddress ?: "remote",
+                direction = "OUTGOING"
+            )
+
+            if (analysis.isAttack) {
+                Log.w("BluetoothViewModel", "Warning: Outgoing message flagged as ${analysis.attackType}")
+            }
+
             val bluetoothMessage = bluetoothController.trySendMessage(message)
-            if(bluetoothMessage != null) {
+            if (bluetoothMessage != null) {
                 _state.update { it.copy(
                     messages = it.messages + bluetoothMessage
                 ) }
-                Log.d("ViewModel", "Message added to UI")
+                Log.d("BluetoothViewModel", "Message sent and added to UI")
             } else {
-                Log.w("ViewModel", "Failed to send message")
+                Log.w("BluetoothViewModel", "Failed to send message")
             }
         }
     }
@@ -125,24 +173,30 @@ class BluetoothViewModel @Inject constructor(
 
     private fun Flow<ConnectionResult>.listen(): Job {
         return onEach { result ->
-            when(result) {
+            when (result) {
                 ConnectionResult.ConnectionEstablished -> {
                     _state.update { it.copy(
                         isConnected = true,
                         isConnecting = false,
                         errorMessage = null
                     ) }
-                    Log.d("ViewModel", "Connection established - IDS monitoring active")
+                    Log.d("BluetoothViewModel", "Connection established - IDS monitoring active")
                 }
+
                 is ConnectionResult.TransferSucceeded -> {
-                    Log.d("ViewModel", "Message received: ${result.message.message}, isAttack: ${result.message.isAttack}")
+                    Log.d("BluetoothViewModel", "Message received: ${result.message.message}")
+
+                    // The message has already been analyzed by BluetoothDataTransferService
+                    // Just add it to the UI
                     _state.update { it.copy(
                         messages = it.messages + result.message
                     ) }
 
-                    // Process the message for additional IDS analysis if needed
-                    processIncomingMessage(result.message)
+                    if (result.message.isAttack) {
+                        Log.w("BluetoothViewModel", "Attack message received: ${result.message.message}")
+                    }
                 }
+
                 is ConnectionResult.Error -> {
                     _state.update { it.copy(
                         isConnected = false,
@@ -150,13 +204,14 @@ class BluetoothViewModel @Inject constructor(
                         errorMessage = result.message
                     ) }
                 }
+
                 ConnectionResult.Disconnected -> {
                     _state.update { it.copy(
                         isConnected = false,
                         isConnecting = false,
                         errorMessage = null
                     ) }
-                    Log.d("ViewModel", "Disconnected - IDS monitoring stopped")
+                    Log.d("BluetoothViewModel", "Disconnected - IDS monitoring stopped")
                 }
             }
         }
@@ -170,14 +225,153 @@ class BluetoothViewModel @Inject constructor(
             .launchIn(viewModelScope)
     }
 
-    override fun onCleared() {
-        super.onCleared()
-        bluetoothController.release()
+    private suspend fun handleAttackNotification(notification: IDSModel.AttackNotification) {
+        // Determine severity
+        val severity = when {
+            notification.attackType == "EXPLOIT" && notification.confidence > 0.8 -> AttackSeverity.CRITICAL
+            notification.attackType == "INJECTION" && notification.confidence > 0.7 -> AttackSeverity.HIGH
+            notification.attackType == "SPOOFING" -> AttackSeverity.MEDIUM
+            notification.attackType == "FLOODING" && notification.count > 10 -> AttackSeverity.HIGH
+            else -> AttackSeverity.LOW
+        }
+
+        // Get device name
+        val deviceName = getDeviceName(notification.deviceId)
+
+        // Create UI notification
+        val uiNotification = AttackNotificationUI(
+            deviceName = deviceName,
+            attackType = notification.attackType,
+            severity = severity,
+            message = formatAttackMessage(notification),
+            timestamp = notification.timestamp
+        )
+
+        // Add to notifications
+        _attackNotifications.value = (_attackNotifications.value + uiNotification)
+            .sortedByDescending { it.timestamp }
+            .take(10)
+
+        // Show alert for high severity
+        if (severity >= AttackSeverity.HIGH) {
+            showSecurityAlert(notification, deviceName, severity)
+        }
+
+        // Show detection explanation
+        _detectionExplanation.value = """
+            🚨 Security Alert: ${notification.attackType}
+            📱 Device: $deviceName
+            📊 Confidence: ${String.format("%.1f", notification.confidence * 100)}%
+            🔢 Count: ${notification.count} attacks in ${formatTimeWindow(notification.timeWindow)}
+            📝 Sample: "${notification.sampleMessage.take(50)}..."
+        """.trimIndent()
     }
 
-    override fun onSecurityAlert(alert: SecurityAlert) {
-        Log.d("ViewModel", "Security alert handler called: ${alert.attackType}")
-        _securityAlert.value = alert
+    fun onSecurityAlert(alert: SecurityAlert) {
+        Log.d("BluetoothViewModel", "Security alert received: ${alert.attackType}")
+
+        // Convert SecurityAlert to SecurityAlertUI
+        val severity = when {
+            alert.attackType == "EXPLOIT" -> AttackSeverity.CRITICAL
+            alert.attackType == "INJECTION" -> AttackSeverity.HIGH
+            alert.attackType == "SPOOFING" -> AttackSeverity.MEDIUM
+            alert.attackType == "FLOODING" -> AttackSeverity.HIGH
+            else -> AttackSeverity.LOW
+        }
+
+        _securityAlert.value = SecurityAlertUI(
+            deviceAddress = alert.deviceAddress,
+            deviceName = alert.deviceName,
+            attackType = alert.attackType,
+            confidence = 0.9, // Default high confidence for manual alerts
+            message = alert.message,
+            explanation = alert.explanation,
+            patternMatch = "",
+            severity = severity,
+            recommendedActions = getRecommendedActions(alert.attackType)
+        )
+    }
+
+    private fun showSecurityAlert(
+        notification: IDSModel.AttackNotification,
+        deviceName: String,
+        severity: AttackSeverity
+    ) {
+        val recommendedActions = getRecommendedActions(notification.attackType)
+
+        _securityAlert.value = SecurityAlertUI(
+            deviceAddress = notification.deviceId,
+            deviceName = deviceName,
+            attackType = notification.attackType,
+            confidence = notification.confidence,
+            message = notification.sampleMessage,
+            explanation = getAttackExplanation(notification.attackType),
+            patternMatch = "", // Will be filled by IDS
+            severity = severity,
+            recommendedActions = recommendedActions
+        )
+    }
+
+    private fun getDeviceName(deviceAddress: String): String {
+        return state.value.pairedDevices.find { it.address == deviceAddress }?.name
+            ?: state.value.scannedDevices.find { it.address == deviceAddress }?.name
+            ?: deviceAddress
+    }
+
+    private fun formatAttackMessage(notification: IDSModel.AttackNotification): String {
+        val timeWindow = formatTimeWindow(notification.timeWindow)
+
+        return when (notification.attackType) {
+            "INJECTION" -> "Detected ${notification.count} code injection attempts in $timeWindow"
+            "SPOOFING" -> "Detected ${notification.count} spoofing/phishing attempts in $timeWindow"
+            "FLOODING" -> "Device is flooding with ${notification.count} messages in $timeWindow"
+            "EXPLOIT" -> "Detected ${notification.count} exploit attempts in $timeWindow"
+            else -> "Detected ${notification.count} suspicious activities in $timeWindow"
+        }
+    }
+
+    private fun formatTimeWindow(timeMs: Long): String {
+        return when {
+            timeMs < 60000 -> "${timeMs / 1000}s"
+            timeMs < 3600000 -> "${timeMs / 60000}m"
+            else -> "${timeMs / 3600000}h"
+        }
+    }
+
+    private fun getRecommendedActions(attackType: String): List<String> {
+        return when (attackType) {
+            "INJECTION" -> listOf(
+                "Block this device immediately",
+                "Do not execute any commands",
+                "Check for system compromise"
+            )
+            "SPOOFING" -> listOf(
+                "Verify device identity",
+                "Do not click any links",
+                "Do not provide credentials"
+            )
+            "FLOODING" -> listOf(
+                "Temporarily mute device",
+                "Enable rate limiting",
+                "Block if continues"
+            )
+            "EXPLOIT" -> listOf(
+                "Disconnect immediately",
+                "Check system security",
+                "Update security patches"
+            )
+            else -> listOf("Monitor device", "Consider blocking")
+        }
+    }
+
+    private fun getAttackExplanation(attackType: String): String {
+        return when (attackType) {
+            "INJECTION" -> "Attempting to execute malicious code or commands"
+            "SPOOFING" -> "Trying to impersonate a trusted entity or phishing"
+            "FLOODING" -> "Overwhelming the system with excessive messages"
+            "EXPLOIT" -> "Attempting to exploit system vulnerabilities"
+            else -> "Suspicious activity detected"
+        }
     }
 
     fun clearSecurityAlert() {
@@ -185,101 +379,103 @@ class BluetoothViewModel @Inject constructor(
         _detectionExplanation.value = null
     }
 
-    enum class AttackType {
-        SPOOFING,
-        INJECTION,
-        FLOODING,
-        NONE
-    }
-
-    // Enhanced attack simulation for testing
-    suspend fun simulateAttack(type: AttackType) {
-        Log.d("ViewModel", "Simulating attack: $type")
-        when (type) {
-            AttackType.SPOOFING -> {
-                val messages = listOf(
-                    "URGENT: Your account will be suspended! Click http://malicious-site.com to verify immediately",
-                    "Security Alert: Please enter your password at https://fake-bank.com/login",
-                    "Winner! You've won $1000! Click www.scam-site.org to claim your prize"
-                )
-                messages.forEach { msg ->
-                    sendMessage(msg)
-                    delay(1000)
-                }
-            }
-            AttackType.INJECTION -> {
-                val messages = listOf(
-                    "ADMIN COMMAND: {execute: true, payload: 'rm -rf /', escalate: 'root'}",
-                    "<script>alert('XSS Attack')</script>",
-                    "'; DROP TABLE users; --",
-                    "System command: eval('malicious_code()')"
-                )
-                messages.forEach { msg ->
-                    sendMessage(msg)
-                    delay(1000)
-                }
-            }
-            AttackType.FLOODING -> {
-                repeat(10) { i ->
-                    sendMessage("FLOOD_${System.currentTimeMillis()}_$i")
-                    delay(50) // Send very fast to trigger flood detection
-                }
-            }
-            AttackType.NONE -> {
-                sendMessage("Hello, this is a normal message for testing purposes.")
-            }
-        }
-    }
-
     fun blockDevice(deviceAddress: String) {
-        // Implementation to block the device
-        Log.d("ViewModel", "Blocking device: $deviceAddress")
-        // You can implement actual blocking logic here
-    }
+        viewModelScope.launch {
+            Log.d("BluetoothViewModel", "Blocking device: $deviceAddress")
 
-    suspend fun processIncomingMessage(message: BluetoothMessage) {
-        // Additional processing if needed
-        if (message.isAttack) {
-            Log.w("ViewModel", "Attack message processed: ${message.message}")
+            // Clear IDS history for this device
+            idsModel.clearDeviceHistory(deviceAddress)
+
+            // Disconnect if connected
+            if (connectedDeviceAddress == deviceAddress) {
+                disconnectFromDevice()
+            }
+
+            // Mark notification as acted upon
+            _attackNotifications.value = _attackNotifications.value.map { notif ->
+                if (notif.deviceName.contains(deviceAddress)) {
+                    notif.copy(actionTaken = true)
+                } else notif
+            }
+
+            // TODO: Implement actual device blocking in BluetoothController
         }
     }
 
-    // Test IDS functionality
+    // Test functions for development
     fun testIDSSystem() {
         viewModelScope.launch {
-            Log.d("ViewModel", "Testing IDS system...")
+            Log.d("BluetoothViewModel", "Testing IDS system...")
             val testResults = idsModel.runTestCases()
 
-            Log.d("ViewModel", "=== IDS Test Results ===")
             testResults.forEach { (message, result) ->
-                Log.d("ViewModel", "Test: '$message'")
-                Log.d("ViewModel", "  -> Attack: ${result.isAttack}")
-                Log.d("ViewModel", "  -> Type: ${result.attackType}")
-                Log.d("ViewModel", "  -> Confidence: ${String.format("%.2f", result.confidence)}")
-                Log.d("ViewModel", "  -> Explanation: ${result.explanation}")
-                Log.d("ViewModel", "---")
+                Log.d("BluetoothViewModel", "Test: '${message.take(30)}...'")
+                Log.d("BluetoothViewModel", "  Result: ${result.attackType} (${String.format("%.1f", result.confidence * 100)}%)")
             }
-            Log.d("ViewModel", "=== End IDS Test ===")
         }
     }
 
-    // Manual message analysis for testing
+    fun simulateAttack(type: AttackType) {
+        viewModelScope.launch {
+            Log.d("BluetoothViewModel", "Simulating $type attack")
+
+            val messages = when (type) {
+                AttackType.SPOOFING -> listOf(
+                    "URGENT: Your account will be suspended! Click http://malicious.com",
+                    "Security Alert: Verify your password at www.fake-site.com"
+                )
+                AttackType.INJECTION -> listOf(
+                    "{ \"command\": \"delete_files\", \"target\": \"*\" }",
+                    "<script>alert('XSS')</script>",
+                    "'; DROP TABLE users; --"
+                )
+                AttackType.FLOODING -> List(15) { i ->
+                    "FLOOD_${System.currentTimeMillis()}_$i"
+                }
+                AttackType.NONE -> listOf("Normal test message")
+            }
+
+            messages.forEach { msg ->
+                sendMessage(msg)
+                delay(if (type == AttackType.FLOODING) 50 else 1000)
+            }
+        }
+    }
+
     fun analyzeMessage(message: String) {
         viewModelScope.launch {
             val result = idsModel.analyzeMessage(message)
-            Log.d("ViewModel", "Manual analysis of '$message':")
-            Log.d("ViewModel", "Result: ${result.isAttack}, Type: ${result.attackType}, Confidence: ${result.confidence}")
+            Log.d("BluetoothViewModel", "Manual analysis of '$message':")
+            Log.d("BluetoothViewModel", "Result: ${result.isAttack}, Type: ${result.attackType}, Confidence: ${result.confidence}")
 
             if (result.isAttack) {
                 _detectionExplanation.value = """
                     🔍 Manual Analysis Result:
                     🚨 Attack Type: ${result.attackType}
                     📊 Confidence: ${String.format("%.1f", result.confidence * 100)}%
-                    🤖 Detection: ${if (result.isAttack) "AI Model" else "Rule-based"}
                     📝 Pattern: ${result.patternMatch}
                     ℹ️ ${result.explanation}
                 """.trimIndent()
             }
         }
+    }
+
+    fun getAttackSummary(): Map<String, Int> {
+        return idsModel.getAttackSummary()
+    }
+
+    fun resetModel() {
+        viewModelScope.launch {
+            idsModel.resetModel()
+            _attackNotifications.value = emptyList()
+            _detectionExplanation.value = null
+            Log.d("BluetoothViewModel", "IDS model reset - history cleared")
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        bluetoothController.release()
+        idsModel.cleanup()
     }
 }

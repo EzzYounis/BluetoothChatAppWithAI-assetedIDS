@@ -1,4 +1,3 @@
-// com.plcoding.bluetoothchat.data.chat.AndroidBluetoothController.kt
 package com.plcoding.bluetoothchat.data.chat
 
 import android.Manifest
@@ -22,7 +21,6 @@ import kotlinx.coroutines.flow.*
 import java.io.IOException
 import java.util.*
 import javax.inject.Inject
-import java.util.concurrent.atomic.AtomicBoolean
 
 @SuppressLint("MissingPermission")
 class AndroidBluetoothController @Inject constructor(
@@ -47,6 +45,11 @@ class AndroidBluetoothController @Inject constructor(
     private var dataTransferService: BluetoothDataTransferService? = null
     private var currentServerSocket: BluetoothServerSocket? = null
     private var currentClientSocket: BluetoothSocket? = null
+
+    // Track the connected device address
+    private var _connectedDeviceAddress: String? = null
+    override val connectedDeviceAddress: String?
+        get() = _connectedDeviceAddress
 
     private val _isConnected = MutableStateFlow(false)
     override val isConnected: StateFlow<Boolean>
@@ -131,7 +134,11 @@ class AndroidBluetoothController @Inject constructor(
                 }
 
                 currentClientSocket?.let { socket ->
-                    Log.d("BluetoothController", "Client connected: ${socket.remoteDevice?.name}")
+                    val remoteDevice = socket.remoteDevice
+                    Log.d("BluetoothController", "Client connected: ${remoteDevice?.name}")
+
+                    // Store connected device address
+                    _connectedDeviceAddress = remoteDevice?.address
 
                     currentServerSocket?.close()
                     _isConnected.value = true
@@ -183,6 +190,9 @@ class AndroidBluetoothController @Inject constructor(
         cleanupConnection()
         _isConnected.value = false
 
+        // Store the device address we're connecting to
+        _connectedDeviceAddress = device.address
+
         currentClientSocket = bluetoothAdapter
             ?.getRemoteDevice(device.address)
             ?.createRfcommSocketToServiceRecord(
@@ -228,6 +238,7 @@ class AndroidBluetoothController @Inject constructor(
                 Log.e("BluetoothController", "Connection failed", e)
                 socket.close()
                 currentClientSocket = null
+                _connectedDeviceAddress = null
                 emit(ConnectionResult.Error("Connection failed: ${e.message}"))
             }
         } ?: emit(ConnectionResult.Error("Failed to create socket"))
@@ -304,6 +315,7 @@ class AndroidBluetoothController @Inject constructor(
         currentServerSocket = null
         dataTransferService = null
         _isConnected.value = false
+        _connectedDeviceAddress = null
     }
 
     override fun closeConnection() {

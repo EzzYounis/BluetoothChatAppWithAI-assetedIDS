@@ -3,10 +3,7 @@ package com.plcoding.bluetoothchat.presentation
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -22,7 +19,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.*
-
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,12 +27,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.plcoding.bluetoothchat.presentation.components.ChatScreen
 import com.plcoding.bluetoothchat.presentation.components.DeviceScreen
-import com.plcoding.bluetoothchat.presentation.components.SecurityAlertHandler
 import com.plcoding.bluetoothchat.ui.theme.BluetoothChatTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
-class MainActivity : ComponentActivity(),SecurityAlertHandler {
+class MainActivity : ComponentActivity() {
 
     private val bluetoothManager by lazy {
         applicationContext.getSystemService(BluetoothManager::class.java)
@@ -47,11 +42,8 @@ class MainActivity : ComponentActivity(),SecurityAlertHandler {
 
     private val isBluetoothEnabled: Boolean
         get() = bluetoothAdapter?.isEnabled == true
-    private val viewModel: BluetoothViewModel by viewModels()
 
-    override fun onSecurityAlert(alert: SecurityAlert) {
-        viewModel.onSecurityAlert(alert)
-    }
+    private val viewModel: BluetoothViewModel by viewModels()
 
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -90,39 +82,6 @@ class MainActivity : ComponentActivity(),SecurityAlertHandler {
                 val state by viewModel.state.collectAsState()
                 val context = LocalContext.current
                 val securityAlert by viewModel.securityAlert.collectAsState()
-
-                // Handle security alerts
-                DisposableEffect(Unit) {
-                    val receiver = object : BroadcastReceiver() {
-                        override fun onReceive(context: Context, intent: Intent) {
-                            if (intent.action == "SECURITY_ALERT") {
-                                val attackType = intent.getStringExtra("ATTACK_TYPE") ?: "unknown"
-                                val deviceName = intent.getStringExtra("DEVICE_NAME") ?: "Unknown"
-                                val deviceAddress = intent.getStringExtra("DEVICE_ADDRESS") ?: "00:00:00:00:00:00"
-                                val message = intent.getStringExtra("MESSAGE") ?: ""
-
-                                viewModel.onSecurityAlert(
-                                    SecurityAlert(
-                                        attackType = attackType,
-                                        deviceName = deviceName,
-                                        deviceAddress = deviceAddress,
-                                        message = message,detectionMethod = "Manual Trigger",
-                                        explanation = "This is a demonstration of the security alert system"
-                                    )
-                                )
-                            }
-                        }
-                    }
-                    context.registerReceiver(
-                        receiver,
-                        IntentFilter("SECURITY_ALERT"),
-                        RECEIVER_NOT_EXPORTED
-                    )
-
-                    onDispose {
-                        context.unregisterReceiver(receiver)
-                    }
-                }
 
                 // Show error messages
                 LaunchedEffect(key1 = state.errorMessage) {
@@ -204,7 +163,7 @@ fun ConnectingScreen() {
 
 @Composable
 fun SecurityAlertDialog(
-    alert: SecurityAlert,
+    alert: BluetoothViewModel.SecurityAlertUI,
     onDismiss: () -> Unit,
     onBlockDevice: () -> Unit
 ) {
@@ -212,15 +171,26 @@ fun SecurityAlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                "Security Alert - ${alert.attackType.replaceFirstChar { it.uppercase() }}",
+                "🚨 Security Alert - ${alert.attackType}",
                 color = MaterialTheme.colors.error
             )
         },
         text = {
             Column {
-                Text("Device: ${alert.deviceName} (${alert.deviceAddress})")
+                Text("Device: ${alert.deviceName}")
+                Text("Address: ${alert.deviceAddress}")
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("Message: ${alert.message.take(200)}")
+                Text("Threat Level: ${alert.severity}")
+                Text("Confidence: ${String.format("%.1f", alert.confidence * 100)}%")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Message: \"${alert.message.take(100)}...\"")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(alert.explanation)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Recommended Actions:")
+                alert.recommendedActions.forEach { action ->
+                    Text("• $action")
+                }
             }
         },
         confirmButton = {
