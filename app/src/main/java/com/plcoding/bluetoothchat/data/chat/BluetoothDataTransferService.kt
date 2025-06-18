@@ -141,8 +141,11 @@ class BluetoothDataTransferService(
                         message = messageText,
                         senderName = deviceName,
                         isFromLocalUser = false,
-                        isAttack = detectionResult.isAttack
+                        isAttack = detectionResult.isAttack,
+                        attackType = if (detectionResult.isAttack) detectionResult.attackType else "",
+                        attackConfidence = if (detectionResult.isAttack) detectionResult.confidence else 0.0
                     )
+
 
                     emit(message)
                     Log.d("BluetoothDataTransfer", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

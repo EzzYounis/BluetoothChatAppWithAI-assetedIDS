@@ -49,7 +49,12 @@ class BluetoothViewModel @Inject constructor(
     private val _attackNotifications = MutableStateFlow<List<AttackNotificationUI>>(emptyList())
     val attackNotifications: StateFlow<List<AttackNotificationUI>> = _attackNotifications.asStateFlow()
 
+    // IDS Statistics
+    private val _idsStatistics = MutableStateFlow<IDSStatistics>(IDSStatistics())
+    val idsStatistics: StateFlow<IDSStatistics> = _idsStatistics.asStateFlow()
+
     private var deviceConnectionJob: Job? = null
+    private var statisticsUpdateJob: Job? = null
 
     // Data classes for UI
     data class SecurityAlertUI(
@@ -73,6 +78,15 @@ class BluetoothViewModel @Inject constructor(
         val message: String,
         val timestamp: Long,
         val actionTaken: Boolean = false
+    )
+
+    data class IDSStatistics(
+        val totalMessages: Int = 0,
+        val attacksDetected: Map<String, Int> = emptyMap(),
+        val messageRate: Float = 0f,
+        val detectionRate: Float = 0f,
+        val modelStatus: String = "Active",
+        val lastUpdate: Long = System.currentTimeMillis()
     )
 
     enum class AttackSeverity {
@@ -103,6 +117,9 @@ class BluetoothViewModel @Inject constructor(
             _state.update { it.copy(isConnected = isConnected) }
             if (isConnected) {
                 Log.d("BluetoothViewModel", "Connected - IDS monitoring active")
+                startStatisticsUpdates()
+            } else {
+                stopStatisticsUpdates()
             }
         }.launchIn(viewModelScope)
 
@@ -110,6 +127,60 @@ class BluetoothViewModel @Inject constructor(
         bluetoothController.errors.onEach { error ->
             _state.update { it.copy(errorMessage = error) }
         }.launchIn(viewModelScope)
+
+        // Initial statistics update
+        updateIDSStatistics()
+    }
+
+    private fun startStatisticsUpdates() {
+        statisticsUpdateJob?.cancel()
+        statisticsUpdateJob = viewModelScope.launch {
+            while (true) {
+                updateIDSStatistics()
+                delay(1000) // Update every second
+            }
+        }
+    }
+
+    private fun stopStatisticsUpdates() {
+        statisticsUpdateJob?.cancel()
+        statisticsUpdateJob = null
+    }
+
+    private fun updateIDSStatistics() {
+        // Get all device stats
+        val allDeviceStats = idsModel.getAllDeviceStats()
+
+        // Calculate total messages from all devices
+        val totalMessages = allDeviceStats.values.sumOf { it.messageCount }
+
+        // Get attack summary
+        val attackSummary = idsModel.getAttackSummary()
+
+        // Calculate message rate - either for connected device or all devices
+        val messageRate = if (connectedDeviceAddress != null) {
+            idsModel.getDeviceMessageRate(connectedDeviceAddress!!)
+        } else {
+            idsModel.getAllMessageRates()
+        }
+
+        // Calculate detection rate
+        val totalAttacks = attackSummary.values.sum()
+        val detectionRate = if (totalMessages > 0) {
+            (totalAttacks.toFloat() / totalMessages) * 100f
+        } else 0f
+
+        _idsStatistics.value = IDSStatistics(
+            totalMessages = totalMessages,
+            attacksDetected = attackSummary,
+            messageRate = messageRate,
+            detectionRate = detectionRate,
+            modelStatus = "Active",
+            lastUpdate = System.currentTimeMillis()
+        )
+
+        // Log statistics update
+        Log.d("BluetoothViewModel", "Statistics Update - Messages: $totalMessages, Rate: ${String.format("%.1f", messageRate)}/min, Attacks: $totalAttacks, Detection Rate: ${String.format("%.1f", detectionRate)}%")
     }
 
     fun connectToDevice(device: BluetoothDeviceDomain) {
@@ -126,6 +197,7 @@ class BluetoothViewModel @Inject constructor(
             isConnecting = false,
             isConnected = false
         ) }
+        stopStatisticsUpdates()
     }
 
     fun waitForIncomingConnections() {
@@ -157,6 +229,9 @@ class BluetoothViewModel @Inject constructor(
                     messages = it.messages + bluetoothMessage
                 ) }
                 Log.d("BluetoothViewModel", "Message sent and added to UI")
+
+                // Update statistics after sending
+                updateIDSStatistics()
             } else {
                 Log.w("BluetoothViewModel", "Failed to send message")
             }
@@ -181,6 +256,12 @@ class BluetoothViewModel @Inject constructor(
                         errorMessage = null
                     ) }
                     Log.d("BluetoothViewModel", "Connection established - IDS monitoring active")
+
+                    // Log IDS statistics on connection
+                    viewModelScope.launch {
+                        delay(500) // Wait for IDS to initialize
+                        Log.i("BluetoothViewModel", idsModel.getStatistics())
+                    }
                 }
 
                 is ConnectionResult.TransferSucceeded -> {
@@ -195,6 +276,9 @@ class BluetoothViewModel @Inject constructor(
                     if (result.message.isAttack) {
                         Log.w("BluetoothViewModel", "Attack message received: ${result.message.message}")
                     }
+
+                    // Update statistics after receiving message
+                    updateIDSStatistics()
                 }
 
                 is ConnectionResult.Error -> {
@@ -212,6 +296,10 @@ class BluetoothViewModel @Inject constructor(
                         errorMessage = null
                     ) }
                     Log.d("BluetoothViewModel", "Disconnected - IDS monitoring stopped")
+
+                    // Log final statistics
+                    Log.i("BluetoothViewModel", "=== FINAL IDS STATISTICS ===")
+                    Log.i("BluetoothViewModel", idsModel.getStatistics())
                 }
             }
         }
@@ -257,7 +345,7 @@ class BluetoothViewModel @Inject constructor(
             showSecurityAlert(notification, deviceName, severity)
         }
 
-        // Show detection explanation
+        // Show detection explanation with confidence percentage
         _detectionExplanation.value = """
             🚨 Security Alert: ${notification.attackType}
             📱 Device: $deviceName
@@ -265,6 +353,9 @@ class BluetoothViewModel @Inject constructor(
             🔢 Count: ${notification.count} attacks in ${formatTimeWindow(notification.timeWindow)}
             📝 Sample: "${notification.sampleMessage.take(50)}..."
         """.trimIndent()
+
+        // Update statistics
+        updateIDSStatistics()
     }
 
     fun onSecurityAlert(alert: SecurityAlert) {
@@ -412,6 +503,10 @@ class BluetoothViewModel @Inject constructor(
                 Log.d("BluetoothViewModel", "Test: '${message.take(30)}...'")
                 Log.d("BluetoothViewModel", "  Result: ${result.attackType} (${String.format("%.1f", result.confidence * 100)}%)")
             }
+
+            // Log final test statistics
+            Log.i("BluetoothViewModel", "=== TEST STATISTICS ===")
+            Log.i("BluetoothViewModel", idsModel.getStatistics())
         }
     }
 
@@ -469,6 +564,7 @@ class BluetoothViewModel @Inject constructor(
             idsModel.resetModel()
             _attackNotifications.value = emptyList()
             _detectionExplanation.value = null
+            _idsStatistics.value = IDSStatistics()
             Log.d("BluetoothViewModel", "IDS model reset - history cleared")
         }
     }
@@ -477,5 +573,10 @@ class BluetoothViewModel @Inject constructor(
         super.onCleared()
         bluetoothController.release()
         idsModel.cleanup()
+        stopStatisticsUpdates()
+
+        // Log final statistics
+        Log.i("BluetoothViewModel", "=== VIEWMODEL CLEANUP - FINAL STATISTICS ===")
+        Log.i("BluetoothViewModel", idsModel.getStatistics())
     }
 }
