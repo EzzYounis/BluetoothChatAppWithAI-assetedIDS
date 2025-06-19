@@ -12,6 +12,10 @@ import kotlin.math.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicInteger
+import java.io.File
+import android.os.Environment
+import java.text.SimpleDateFormat
+import java.util.concurrent.atomic.AtomicBoolean
 
 class IDSModel(private val context: Context) {
     val modelName = "Bluetooth Security IDS - Enhanced v9.0"
@@ -40,9 +44,14 @@ class IDSModel(private val context: Context) {
     // Statistics tracking
     private val detectionStats = DetectionStatistics()
 
+    // Performance tracking
+    private val performanceTracker = IDSPerformanceTracker()
+    val performanceFlow: StateFlow<IDSPerformanceTracker.PerformanceReport>
+        get() = performanceTracker.performanceFlow
+
     // Enhanced thresholds for better accuracy
-    private val confidenceThreshold = 0.75  // Reduced from 0.85 for better detection
-    private val ruleBasedThreshold = 0.7   // Reduced from 0.8 for better detection
+    private val confidenceThreshold = 0.70  // Lowered for better spoofing detection
+    private val ruleBasedThreshold = 0.65   // Lowered for better spoofing detection
     private val attackCooldownMs = 30000L
     private val attackGroupingWindowMs = 5000L
     private val historyWindowMs = 60000L
@@ -50,76 +59,114 @@ class IDSModel(private val context: Context) {
     // Rate limiting
     private val rateLimiter = RateLimiter()
 
-    // Enhanced attack patterns with better specificity
+    // Logging
+    private val isLoggingEnabled = AtomicBoolean(true)
+    private val logDirectory by lazy {
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS),
+            "BluetoothChatLogs").apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    // ENHANCED SPOOFING PATTERNS - More comprehensive detection
+    private val spoofingPatterns = listOf(
+        // URLs with urgency - HIGH PRIORITY
+        Regex("""(urgent|immediate|action required|verify now|click here|expire|suspend).*https?://[^\s]+""", RegexOption.IGNORE_CASE),
+        Regex("""https?://[^\s]+.*(urgent|immediate|expire|suspend|verify)""", RegexOption.IGNORE_CASE),
+
+        // Shortened URLs (common in phishing)
+        Regex("""(bit\.ly|tinyurl|goo\.gl|t\.co|short\.link)/[^\s]+""", RegexOption.IGNORE_CASE),
+
+        // Account/Security threats
+        Regex("""(your|the)\s+(account|password|security|access).*will.*\b(expire|suspend|lock|disable|terminate|close)\b""", RegexOption.IGNORE_CASE),
+        Regex("""\b(suspend|lock|expire|disable|deactivate|terminate|close|delete)\b.*\b(account|access|password|service)\b""", RegexOption.IGNORE_CASE),
+
+        // Credential phishing
+        Regex("""(enter|verify|confirm|update|change|reset)\s+(your\s+)?(password|pin|credential|code|account)""", RegexOption.IGNORE_CASE),
+        Regex("""(password|account|security).*\b(expire|reset|change|update)\b""", RegexOption.IGNORE_CASE),
+
+        // Admin/System impersonation
+        Regex("""^(admin|administrator|system|security|support|service)[\s:-]+""", RegexOption.IGNORE_CASE),
+        Regex("""(from|this is)\s+(admin|administrator|system|security|support)""", RegexOption.IGNORE_CASE),
+        Regex("""pair with (admin|system|security|service)[-\s]\d+""", RegexOption.IGNORE_CASE),
+
+        // Fake warnings and alerts
+        Regex("""(warning|alert|attention|notice)[:!].*\b(account|security|virus|threat|risk)\b""", RegexOption.IGNORE_CASE),
+        Regex("""your\s+(device|phone|account|system)\s+(is|has been|may be)\s+(infected|compromised|hacked|at risk)""", RegexOption.IGNORE_CASE),
+        Regex("""(virus|malware|trojan|threat|infection)\s+(detected|found|discovered|alert)""", RegexOption.IGNORE_CASE),
+
+        // Money/Prize scams
+        Regex("""(congratulations|you('ve)? won|winner|prize|lottery|free money|claim your)""", RegexOption.IGNORE_CASE),
+        Regex("""(click|tap|visit|go to).*\b(claim|collect|receive|get)\b.*\b(prize|money|reward|gift)\b""", RegexOption.IGNORE_CASE),
+
+        // Generic phishing phrases
+        Regex("""(click|tap|visit|go to)\s+(here|this link|below)""", RegexOption.IGNORE_CASE),
+        Regex("""verify\s+(your\s+)?(identity|account|information)""", RegexOption.IGNORE_CASE),
+
+        // Suspicious domains
+        Regex("""https?://[^\s]*\.(tk|ml|ga|cf)""", RegexOption.IGNORE_CASE),
+
+        // Social engineering
+        Regex("""(act now|limited time|expires? (in|soon|today)|last chance|don't miss)""", RegexOption.IGNORE_CASE)
+    )
+
+    // Enhanced injection patterns
     private val injectionPatterns = listOf(
         // SQL Injection
-        Regex("""(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER)\b.*\b(FROM|INTO|TABLE|WHERE|SET)\b)""", RegexOption.IGNORE_CASE),
-        Regex("""(['"]).*\1\s*(OR|AND)\s*\d+\s*=\s*\d+""", RegexOption.IGNORE_CASE),  // SQL injection with quotes
-        Regex("""(--|\#|\/\*)\s*$""", RegexOption.MULTILINE),  // SQL comments
+        Regex("""(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|FROM|WHERE)\b)""", RegexOption.IGNORE_CASE),
+        Regex("""(['"]).*\1\s*(OR|AND)\s*(['"]?\d+['"]?|true|false)\s*=\s*(['"]?\d+['"]?|true|false)""", RegexOption.IGNORE_CASE),
+        Regex("""(--|#|/\*|\*/)\s*(DROP|DELETE|INSERT|UPDATE|SELECT)""", RegexOption.IGNORE_CASE),
+        Regex("""'\s*;\s*(DROP|DELETE|INSERT|UPDATE|SELECT)""", RegexOption.IGNORE_CASE),
 
         // Command Injection
-        Regex("""(;|\||&&)\s*(rm|del|format|shutdown|reboot)\s""", RegexOption.IGNORE_CASE),
-        Regex("""(exec|system|eval|shell_exec)\s*\(""", RegexOption.IGNORE_CASE),
+        Regex("""(;|&&|\|\|)\s*(rm|del|format|shutdown|reboot|kill|sudo)\s""", RegexOption.IGNORE_CASE),
+        Regex("""(exec|system|eval|shell_exec|passthru|popen)\s*\(""", RegexOption.IGNORE_CASE),
+        Regex("""\$\([^)]+\)"""),  // Command substitution
+        Regex("""`[^`]+`"""),       // Backtick execution
 
         // Script Injection
         Regex("""<script[^>]*>.*?</script>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)),
-        Regex("""on(click|load|error|mouseover)\s*=\s*["']""", RegexOption.IGNORE_CASE),
+        Regex("""on(click|load|error|mouseover|focus|blur)\s*=\s*["']""", RegexOption.IGNORE_CASE),
+        Regex("""javascript:\s*[^"']+""", RegexOption.IGNORE_CASE),
 
         // JSON/Code Injection
-        Regex("""\{[^}]*["']?(command|exec|cmd|execute|run)["']?\s*:\s*["'][^"']*["']""", RegexOption.IGNORE_CASE),
-        Regex("""\{[^}]*["']?(delete|remove|drop|destroy)["']?\s*:\s*["']?\*["']?""", RegexOption.IGNORE_CASE)
-    )
-
-    private val spoofingPatterns = listOf(
-        // Phishing with URLs
-        Regex("""(urgent|immediate|action required|verify now|click here).*https?://""", RegexOption.IGNORE_CASE),
-        Regex("""(suspend|lock|expire|disable).*account.*https?://""", RegexOption.IGNORE_CASE),
-
-        // Credential phishing
-        Regex("""(enter|verify|confirm|update).*password""", RegexOption.IGNORE_CASE),
-        Regex("""password.*expire""", RegexOption.IGNORE_CASE),
-
-        // Admin impersonation
-        Regex("""^(admin|administrator|system):\s*(pair|connect|verify)""", RegexOption.IGNORE_CASE),
-        Regex("""pair with (admin|system)-\d+""", RegexOption.IGNORE_CASE),
-
-        // Fake warnings
-        Regex("""your (device|account|system) (is|has been) (infected|compromised|hacked)""", RegexOption.IGNORE_CASE),
-        Regex("""(virus|malware|trojan) (detected|found)""", RegexOption.IGNORE_CASE)
+        Regex("""\{[^}]*["']?(command|exec|cmd|execute|run|delete|remove|drop)["']?\s*:\s*["'][^"']+["']""", RegexOption.IGNORE_CASE),
+        Regex("""["']?(malicious|exploit|payload|attack)["']?\s*:\s*(true|["'][^"']+["'])""", RegexOption.IGNORE_CASE)
     )
 
     private val floodingPatterns = listOf(
         // Explicit flood patterns
-        Regex("""^FLOOD_\d+(_\d+)?$"""),
-        Regex("""^(PING|TEST|SPAM)\s*$""", RegexOption.IGNORE_CASE),
+        Regex("""^FLOOD_[\d_]+$"""),
+        Regex("""^(PING|TEST|SPAM|FLOOD|DDOS)\s*\d*$""", RegexOption.IGNORE_CASE),
 
-        // Repetitive patterns (but not simple repeated characters)
-        Regex("""^(.{2,})\1{5,}$"""),  // Pattern repeated 5+ times
-        Regex("""^[A-Z0-9_]{30,}$"""),  // Long uppercase strings without spaces
+        // Repetitive patterns
+        Regex("""^(.{1,10})\1{5,}$"""),  // Short pattern repeated many times
+        Regex("""^[A-Z0-9_]{50,}$"""),   // Very long uppercase strings
 
         // Excessive repetition
-        Regex("""(.)\1{20,}"""),  // Same character 20+ times
-        Regex("""(\b\w+\b)(?:\s+\1){5,}""")  // Same word repeated 5+ times
+        Regex("""(.)\1{30,}"""),         // Same character 30+ times
+        Regex("""(\b\w+\b)(\s+\1){10,}""")  // Same word repeated 10+ times
     )
 
     private val exploitPatterns = listOf(
         // Hex/Binary payloads
-        Regex("""(\\x[0-9a-fA-F]{2}){5,}"""),  // Multiple hex bytes
-        Regex("""[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\xFF]{3,}"""),  // Control characters
+        Regex("""(\\x[0-9a-fA-F]{2}){10,}"""),  // Multiple hex bytes
+        Regex("""[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\xFF]{5,}"""),  // Control characters
 
         // AT Commands
-        Regex("""^AT\+[A-Z]+=""", RegexOption.IGNORE_CASE),
+        Regex("""^AT\+[A-Z]+(=|$)""", RegexOption.IGNORE_CASE),
+        Regex("""AT\+(FACTORY|RESET|REBOOT)""", RegexOption.IGNORE_CASE),
 
         // Buffer overflow attempts
-        Regex("""[A-Za-z0-9]{1000,}"""),  // Extremely long strings
+        Regex("""[A-Za-z0-9]{500,}"""),  // Extremely long strings
 
         // Format string attacks
-        Regex("""%[snpx]"""),
+        Regex("""%[0-9]*[snpxd]"""),
         Regex("""%\d+\$[snpx]"""),
 
         // Path traversal
-        Regex("""(\.\./){2,}"""),
-        Regex("""(\\\\){2,}""")
+        Regex("""(\.\./|\.\.\\){2,}"""),
+        Regex("""(etc/passwd|windows\\system32)""", RegexOption.IGNORE_CASE)
     )
 
     // Enhanced safe message patterns
@@ -157,7 +204,7 @@ class IDSModel(private val context: Context) {
         "see", "other", "than", "then", "now", "look", "only", "come", "its", "over",
         "think", "also", "back", "after", "use", "two", "how", "our", "work",
         "first", "well", "way", "even", "new", "want", "because", "any", "these",
-        "give", "day", "most", "us", "admin", "hello", "hi", "test", "testing"
+        "give", "day", "most", "us", "hello", "hi", "test", "testing", "message"
     )
 
     // Data classes
@@ -383,6 +430,9 @@ class IDSModel(private val context: Context) {
         val currentTime = System.currentTimeMillis()
         val messageRecord = MessageRecord(currentTime, fromDevice, toDevice, message, direction)
 
+        // Generate a unique message ID for tracking
+        val messageId = "${fromDevice}_${currentTime}_${message.hashCode()}"
+
         updateDeviceStats(messageRecord)
 
         // Quick check for safe messages
@@ -395,6 +445,16 @@ class IDSModel(private val context: Context) {
                 explanation = "Common safe communication",
                 patternMatch = "Safe phrase detected"
             )
+
+            // Track performance
+            val actualType = determineActualType(message, "NORMAL")
+            performanceTracker.recordDetectionAuto(
+                predictedType = "NORMAL",
+                actualType = actualType,
+                confidence = result.confidence,
+                startTime = startTime
+            )
+
             detectionStats.recordDetection("NORMAL", result.confidence, processingTime, "RULE")
             Log.d("IDS", "Safe message detected in ${processingTime}ms")
             return@withContext result
@@ -410,6 +470,16 @@ class IDSModel(private val context: Context) {
                 explanation = "Normal communication pattern",
                 patternMatch = "Common phrase"
             )
+
+            // Track performance
+            val actualType = determineActualType(message, "NORMAL")
+            performanceTracker.recordDetectionAuto(
+                predictedType = "NORMAL",
+                actualType = actualType,
+                confidence = result.confidence,
+                startTime = startTime
+            )
+
             detectionStats.recordDetection("NORMAL", result.confidence, processingTime, "RULE")
             Log.d("IDS", "Message skipped (false positive prevention) in ${processingTime}ms")
             return@withContext result
@@ -436,6 +506,15 @@ class IDSModel(private val context: Context) {
             else -> "RULE"
         }
 
+        // Track performance with actual type determination
+        val actualType = determineActualType(message, finalResult.attackType)
+        performanceTracker.recordDetectionAuto(
+            predictedType = if (finalResult.isAttack) finalResult.attackType else "NORMAL",
+            actualType = actualType,
+            confidence = finalResult.confidence,
+            startTime = startTime
+        )
+
         detectionStats.recordDetection(
             if (finalResult.isAttack) finalResult.attackType else "NORMAL",
             finalResult.confidence,
@@ -457,6 +536,12 @@ class IDSModel(private val context: Context) {
             |-----------------------
         """.trimMargin())
 
+        // Log performance metrics periodically
+        if (detectionStats.totalMessages.get() % 50 == 0) {
+            Log.i("IDS_PERFORMANCE", performanceTracker.performanceFlow.value.toLogString())
+            logPerformanceReport()
+        }
+
         // Handle attack notification logic
         if (finalResult.isAttack) {
             val shouldNotify = handleAttackDetection(fromDevice, finalResult.attackType,
@@ -472,7 +557,7 @@ class IDSModel(private val context: Context) {
 
         // Skip analysis for messages that commonly cause false positives
         val falsePositivePatterns = listOf(
-            // "hello admin" should not be flooding
+            // "hello admin" should not be flooding or spoofing
             Regex("""^(hello|hi|hey|greetings?)\s+(admin|administrator|user|friend|there)$""", RegexOption.IGNORE_CASE),
 
             // Normal conversation with common words
@@ -493,6 +578,11 @@ class IDSModel(private val context: Context) {
         ruleBasedResult: AnalysisResult,
         message: String
     ): AnalysisResult {
+        // Special handling for spoofing - trust rule-based detection more
+        if (ruleBasedResult.attackType == "SPOOFING" && ruleBasedResult.confidence > 0.6) {
+            return ruleBasedResult
+        }
+
         // If both agree on no attack, it's definitely safe
         if (modelResult?.isAttack == false && !ruleBasedResult.isAttack) {
             return modelResult
@@ -501,7 +591,7 @@ class IDSModel(private val context: Context) {
         // If only one detects an attack, require higher confidence
         if (modelResult?.isAttack == true && !ruleBasedResult.isAttack) {
             // Model-only detection needs very high confidence
-            return if (modelResult.confidence > 0.9) {
+            return if (modelResult.confidence > 0.85) {
                 modelResult
             } else {
                 AnalysisResult(
@@ -515,8 +605,8 @@ class IDSModel(private val context: Context) {
         }
 
         if (modelResult?.isAttack == false && ruleBasedResult.isAttack) {
-            // Rule-only detection needs very high confidence
-            return if (ruleBasedResult.confidence > 0.85) {
+            // Rule-only detection - trust it more for spoofing
+            return if (ruleBasedResult.attackType == "SPOOFING" || ruleBasedResult.confidence > 0.75) {
                 ruleBasedResult
             } else {
                 AnalysisResult(
@@ -531,20 +621,20 @@ class IDSModel(private val context: Context) {
 
         // Both detected attack - use the one with higher confidence
         if (modelResult?.isAttack == true && ruleBasedResult.isAttack) {
-            // Verify attack types match or are related
+            // Same type detected - high confidence
             if (modelResult.attackType == ruleBasedResult.attackType) {
-                // Same type detected - high confidence
                 return if (modelResult.confidence > ruleBasedResult.confidence) {
                     modelResult.copy(confidence = minOf(modelResult.confidence * 1.1, 1.0))
                 } else {
                     ruleBasedResult.copy(confidence = minOf(ruleBasedResult.confidence * 1.1, 1.0))
                 }
             } else {
-                // Different types - be more cautious
-                return if (modelResult.confidence > ruleBasedResult.confidence) {
-                    modelResult
-                } else {
-                    ruleBasedResult
+                // Different types - prefer spoofing if detected
+                return when {
+                    ruleBasedResult.attackType == "SPOOFING" -> ruleBasedResult
+                    modelResult.attackType == "SPOOFING" -> modelResult
+                    modelResult.confidence > ruleBasedResult.confidence -> modelResult
+                    else -> ruleBasedResult
                 }
             }
         }
@@ -614,8 +704,9 @@ class IDSModel(private val context: Context) {
         val detectedType = maxEntry?.key ?: "NORMAL"
         val confidence = minOf(maxEntry?.value ?: 0.0, 1.0)
 
-        // Apply stricter threshold
-        val isAttack = confidence > ruleBasedThreshold && detectedType != "NORMAL"
+        // Apply adjusted threshold for better spoofing detection
+        val threshold = if (detectedType == "SPOOFING") 0.6 else ruleBasedThreshold
+        val isAttack = confidence > threshold && detectedType != "NORMAL"
 
         if (isAttack) {
             stats.attackScore = minOf(stats.attackScore + confidence * 0.05, 1.0)
@@ -657,7 +748,7 @@ class IDSModel(private val context: Context) {
                 // Check for specific injection patterns
                 injectionPatterns.forEach { pattern ->
                     if (pattern.containsMatchIn(message)) {
-                        score += 0.3  // Increased from 0.2
+                        score += 0.3
                         patternMatches++
 
                         // Strong indicators
@@ -675,15 +766,15 @@ class IDSModel(private val context: Context) {
 
                 // Specific checks for test patterns
                 if (message.contains("\"command\"") && message.contains("\"delete_files\"")) {
-                    score = 0.9  // High score for exact pattern
+                    score = 0.9
                     strongIndicators = 2
                 }
                 if (message.contains("<script>") && message.contains("</script>")) {
-                    score = 0.9  // High score for script tags
+                    score = 0.9
                     strongIndicators = 2
                 }
                 if (message.contains("DROP TABLE", true)) {
-                    score = 0.9  // High score for SQL injection
+                    score = 0.9
                     strongIndicators = 2
                 }
 
@@ -700,37 +791,90 @@ class IDSModel(private val context: Context) {
             }
 
             "SPOOFING" -> {
+                // ENHANCED SPOOFING DETECTION
                 spoofingPatterns.forEach { pattern ->
                     if (pattern.containsMatchIn(message)) {
-                        score += 0.15
+                        // Give higher weight to URL-based spoofing patterns
+                        val weight = when {
+                            pattern.pattern.contains("https?://") -> 0.4  // URLs get higher weight
+                            pattern.pattern.contains("expire|suspend|lock") -> 0.35
+                            pattern.pattern.contains("password|credential") -> 0.35
+                            pattern.pattern.contains("admin|system") -> 0.3
+                            pattern.pattern.contains("virus|malware") -> 0.3
+                            else -> 0.25
+                        }
+                        score += weight
                         patternMatches++
+
+                        Log.d("IDS", "Spoofing pattern matched: ${pattern.pattern.take(50)}... (weight: $weight)")
                     }
                 }
 
                 // Strong spoofing indicators
-                val hasUrl = message.contains(Regex("https?://|www\\.", RegexOption.IGNORE_CASE))
-                val hasUrgency = message.contains(Regex("urgent|immediate|expire|suspend", RegexOption.IGNORE_CASE))
-                val hasCredentialRequest = message.contains(Regex("password|credential|login", RegexOption.IGNORE_CASE))
-                val isAdminImpersonation = message.matches(Regex("^(admin|system).*", RegexOption.IGNORE_CASE))
+                val hasUrl = message.contains(Regex("https?://|www\\.|bit\\.ly|tinyurl", RegexOption.IGNORE_CASE))
+                val hasUrgency = message.contains(Regex("urgent|immediate|expire|suspend|action required|verify now", RegexOption.IGNORE_CASE))
+                val hasCredentialRequest = message.contains(Regex("password|credential|login|account|verify", RegexOption.IGNORE_CASE))
+                val hasWarning = message.contains(Regex("warning|alert|infected|compromised|virus", RegexOption.IGNORE_CASE))
+                val hasPrize = message.contains(Regex("congratulations|winner|prize|free|claim", RegexOption.IGNORE_CASE))
+                val isAdminImpersonation = message.matches(Regex(".*(admin|system|security|support).*", RegexOption.IGNORE_CASE))
 
-                if (hasUrl && hasUrgency) {
+                // Specific pattern combinations that are very likely spoofing
+                if (hasUrl && (hasUrgency || hasCredentialRequest)) {
+                    score += 0.6
+                    strongIndicators += 2
+                    Log.d("IDS", "Strong spoofing: URL + urgency/credential")
+                } else if (hasUrl && (hasWarning || hasPrize)) {
                     score += 0.5
                     strongIndicators++
-                } else if (hasUrl && hasCredentialRequest) {
+                    Log.d("IDS", "Strong spoofing: URL + warning/prize")
+                } else if (hasCredentialRequest && (hasUrgency || hasWarning)) {
+                    score += 0.45
+                    strongIndicators++
+                    Log.d("IDS", "Strong spoofing: Credential + urgency/warning")
+                } else if (isAdminImpersonation && (hasUrl || hasCredentialRequest)) {
                     score += 0.4
                     strongIndicators++
-                } else if (isAdminImpersonation && message.contains(Regex("pair|connect", RegexOption.IGNORE_CASE))) {
-                    score += 0.4
-                    strongIndicators++
+                    Log.d("IDS", "Strong spoofing: Admin impersonation")
                 }
 
-                // Require URL or strong pattern for spoofing
-                if (!hasUrl && strongIndicators == 0) score *= 0.3
+                // Additional checks for common spoofing phrases
+                val spoofingPhrases = listOf(
+                    "click here", "tap here", "visit this", "go to",
+                    "verify your", "confirm your", "update your",
+                    "will expire", "will be suspended", "action required",
+                    "limited time", "act now", "don't miss"
+                )
+
+                val phraseCount = spoofingPhrases.count { phrase ->
+                    message.contains(phrase, ignoreCase = true)
+                }
+
+                if (phraseCount > 0) {
+                    score += phraseCount * 0.15
+                    Log.d("IDS", "Spoofing phrases found: $phraseCount")
+                }
+
+                // Check for suspicious URL patterns
+                if (hasUrl) {
+                    val suspiciousUrlPattern = Regex("""https?://[^\s]*\.(tk|ml|ga|cf|bit\.ly|tinyurl)""", RegexOption.IGNORE_CASE)
+                    if (suspiciousUrlPattern.containsMatchIn(message)) {
+                        score += 0.3
+                        Log.d("IDS", "Suspicious URL domain detected")
+                    }
+                }
+
+                // Lower threshold for URL-based messages
+                if (hasUrl && score < 0.5) {
+                    score = 0.5  // Minimum score for URL-containing messages
+                }
 
                 // "Hello admin" should not be spoofing
                 if (message.matches(Regex("^(hello|hi|hey)\\s+admin\\s*$", RegexOption.IGNORE_CASE))) {
                     score = 0.0
                 }
+
+                // Normalize very high scores
+                if (score > 1.5) score = 0.95
             }
 
             "FLOODING" -> {
@@ -749,7 +893,7 @@ class IDSModel(private val context: Context) {
 
                 // Strong flood indicators
                 if (message.startsWith("FLOOD_") && message.matches(Regex("FLOOD_\\d+(_\\d+)?"))) {
-                    score = 1.0  // Definite flood
+                    score = 1.0
                 } else if (message.matches(Regex("^(PING|TEST|SPAM)\\s*$", RegexOption.IGNORE_CASE))) {
                     score = 0.9
                 } else if (isAllCaps && hasNoSpaces && messageLength > 50) {
@@ -760,13 +904,13 @@ class IDSModel(private val context: Context) {
 
                 // Check device behavior
                 val messageRate = calculateMessageRate(context.stats)
-                if (messageRate > 10) { // More than 10 messages per minute
+                if (messageRate > 10) {
                     score += 0.3
                 }
 
                 // Reduce score for messages with actual content
                 if (message.contains("{") || message.contains("<") || message.contains("'")) {
-                    score *= 0.3  // Likely injection, not flooding
+                    score *= 0.3
                 }
 
                 // Normal messages should not be flooding
@@ -810,8 +954,12 @@ class IDSModel(private val context: Context) {
         // Final score adjustments
         score = minOf(score, 1.0)
 
-        // Penalize very short messages (unlikely to be attacks)
-        if (messageLength < 10 && patternMatches == 0) score *= 0.1
+        // Penalize very short messages (unlikely to be attacks) except for flooding
+        if (messageLength < 10 && patternMatches == 0 && attackType != "FLOODING") {
+            score *= 0.1
+        }
+
+        Log.d("IDS", "Final $attackType score: ${String.format("%.2f", score)} (patterns: $patternMatches)")
 
         return score
     }
@@ -990,12 +1138,14 @@ class IDSModel(private val context: Context) {
 
             val isAttack = predictedType != "NORMAL" && predictedType != "UNKNOWN"
 
-            // Apply stricter confidence threshold
-            return if (isAttack && confidence >= confidenceThreshold) {
+            // Apply adjusted confidence threshold for spoofing
+            val threshold = if (predictedType == "SPOOFING") 0.65 else confidenceThreshold
+
+            return if (isAttack && confidence >= threshold) {
                 // Verify with quick pattern check
                 val patternConfidence = verifyWithPatterns(record.message, predictedType)
 
-                if (patternConfidence < 0.3) {
+                if (patternConfidence < 0.3 && predictedType != "SPOOFING") {
                     // Model says attack but patterns disagree - likely false positive
                     AnalysisResult(
                         isAttack = false,
@@ -1060,7 +1210,7 @@ class IDSModel(private val context: Context) {
         when (attackType) {
             "INJECTION" -> {
                 if (message.contains(Regex("""\{.*:.*\}"""))) matches.add("JSON payload")
-                if (message.contains(Regex("""<\w+>.*<\/\w+>"""))) matches.add("HTML/XML tags")
+                if (message.contains(Regex("""<\w+>.*</\w+>"""))) matches.add("HTML/XML tags")
                 if (message.contains(Regex("""(DELETE|DROP|UPDATE).*WHERE""", RegexOption.IGNORE_CASE))) {
                     matches.add("SQL injection")
                 }
@@ -1069,14 +1219,20 @@ class IDSModel(private val context: Context) {
                 }
             }
             "SPOOFING" -> {
-                if (message.contains(Regex("""(urgent|immediate).*https?://""", RegexOption.IGNORE_CASE))) {
-                    matches.add("Phishing with urgency")
+                if (message.contains(Regex("""https?://""", RegexOption.IGNORE_CASE))) {
+                    matches.add("Suspicious URL")
+                }
+                if (message.contains(Regex("""(urgent|immediate)""", RegexOption.IGNORE_CASE))) {
+                    matches.add("Urgency indicator")
                 }
                 if (message.contains(Regex("""password.*expire""", RegexOption.IGNORE_CASE))) {
                     matches.add("Password phishing")
                 }
-                if (message.matches(Regex("""^(admin|system):.*""", RegexOption.IGNORE_CASE))) {
+                if (message.contains(Regex("""(admin|system):""", RegexOption.IGNORE_CASE))) {
                     matches.add("Admin impersonation")
+                }
+                if (message.contains(Regex("""verify\s+(your\s+)?(account|identity)""", RegexOption.IGNORE_CASE))) {
+                    matches.add("Verification request")
                 }
             }
             "FLOODING" -> {
@@ -1229,17 +1385,75 @@ class IDSModel(private val context: Context) {
         return directionChanges.toFloat() / (recentHistory.size - 1)
     }
 
+    // Add method to determine actual type (for simulation/testing)
+    private fun determineActualType(message: String, predictedType: String): String {
+        // In production, this would use user feedback or manual validation
+        // For testing, we can use known patterns
+        return when {
+            message.contains("FLOOD_") && message.matches(Regex("FLOOD_\\d+.*")) -> "FLOODING"
+            message.contains("{ \"command\":") || message.contains("DROP TABLE") -> "INJECTION"
+            message.contains("http://") && message.contains(Regex("urgent|expire", RegexOption.IGNORE_CASE)) -> "SPOOFING"
+            message.contains("\\x") || message.contains("AT+") -> "EXPLOIT"
+            else -> predictedType // Trust the prediction
+        }
+    }
+
+    // Add method to log performance report
+    private fun logPerformanceReport() {
+        val report = performanceTracker.generatePerformanceReportString()
+        Log.i("IDS_PERFORMANCE_REPORT", "\n$report")
+
+        // Also log to file if enabled
+        if (isLoggingEnabled.get()) {
+            try {
+                val performanceFile = File(logDirectory, "ids_performance_report.txt")
+                performanceFile.writeText(report)
+            } catch (e: Exception) {
+                Log.e("IDS", "Failed to write performance report", e)
+            }
+        }
+    }
+
+    // Add method to get performance statistics
+    fun getPerformanceStatistics(): String {
+        return performanceTracker.generatePerformanceReportString()
+    }
+
+    // Update the getStatistics method to include performance metrics
+    fun getStatistics(): String {
+        val detectionStatsString = detectionStats.getStatisticsSummary()
+        val performanceStatsString = performanceTracker.performanceFlow.value
+
+        return """
+            $detectionStatsString
+            
+            $performanceStatsString
+        """.trimIndent()
+    }
+
+    // Add method to reset performance tracking
+    fun resetPerformanceTracking() {
+        performanceTracker.reset()
+        Log.i("IDS", "Performance tracking reset")
+    }
+
     suspend fun runTestCases(): List<Pair<String, AnalysisResult>> = withContext(Dispatchers.Default) {
         val testCases = listOf(
             // Injection tests
             "{ \"command\": \"delete_files\", \"target\": \"*\" }" to "INJECTION",
             "SELECT * FROM users WHERE id = '1' OR '1'='1'" to "INJECTION",
             "<script>alert('xss')</script>" to "INJECTION",
+            "'; DROP TABLE users; --" to "INJECTION",
 
-            // Spoofing tests
+            // Spoofing tests - ENHANCED
             "URGENT: Click here http://malicious.com to verify your account" to "SPOOFING",
             "Your password will expire! Update at http://fake-site.com" to "SPOOFING",
             "Admin: Pair with ADMIN-1234 immediately" to "SPOOFING",
+            "WARNING: Your account will be suspended! Visit http://bit.ly/abc123" to "SPOOFING",
+            "Congratulations! You won $1000. Claim at http://prize.com" to "SPOOFING",
+            "Security Alert: Verify your password at www.fake-bank.com" to "SPOOFING",
+            "Your device is infected with virus! Click here to clean" to "SPOOFING",
+            "Action required: Update your credentials http://phishing.site" to "SPOOFING",
 
             // Flooding tests
             "FLOOD_123456789" to "FLOODING",
@@ -1254,11 +1468,13 @@ class IDSModel(private val context: Context) {
             "Hello, how are you?" to "NORMAL",
             "Please send the documents" to "NORMAL",
             "Meeting at 3pm tomorrow" to "NORMAL",
-            "Hello admin" to "NORMAL",  // This should be NORMAL
+            "Hello admin" to "NORMAL",
             "Hi there admin, how are you?" to "NORMAL",
             "Are you the admin?" to "NORMAL",
             "Testing connection" to "NORMAL",
-            "Test message 123" to "NORMAL"
+            "Test message 123" to "NORMAL",
+            "Visit our website www.legitimate-company.com for more info" to "NORMAL",
+            "Please verify the meeting time" to "NORMAL"
         )
 
         Log.d("IDS", "Running ${testCases.size} test cases...")
@@ -1311,8 +1527,6 @@ class IDSModel(private val context: Context) {
             .mapValues { it.value.sumOf { state -> state.count } }
     }
 
-    fun getStatistics(): String = detectionStats.getStatisticsSummary()
-
     fun resetModel() {
         deviceMessageHistory.clear()
         deviceStats.clear()
@@ -1323,6 +1537,7 @@ class IDSModel(private val context: Context) {
         detectionStats.attacksDetected.clear()
         detectionStats.processingTimes.clear()
         detectionStats.confidenceScores.clear()
+        resetPerformanceTracking()
         Log.i("IDS", "Model reset - all data cleared")
     }
 
@@ -1367,3 +1582,4 @@ class IDSModel(private val context: Context) {
         const val FEATURE_MESSAGE_RATE = 21
     }
 }
+

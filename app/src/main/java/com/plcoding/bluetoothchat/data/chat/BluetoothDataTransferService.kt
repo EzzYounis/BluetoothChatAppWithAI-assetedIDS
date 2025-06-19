@@ -40,6 +40,9 @@ class BluetoothDataTransferService(
     private val logFile by lazy {
         File(logDirectory, "bluetooth_messages_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt")
     }
+    private val detailedLogFile by lazy {
+        File(logDirectory, "ids_detailed_analysis_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt")
+    }
     private val isLoggingEnabled = AtomicBoolean(true)
 
     // IDS Components
@@ -49,6 +52,35 @@ class BluetoothDataTransferService(
         Log.d("BluetoothDataTransfer", "=== IDS SYSTEM INITIALIZED ===")
         Log.d("BluetoothDataTransfer", "Model: ${idsModel.modelName}")
         Log.d("BluetoothDataTransfer", "Monitoring: ACTIVE")
+
+        // Initialize log files with headers
+        initializeLogFiles()
+    }
+
+    private fun initializeLogFiles() {
+        try {
+            // Main log file header
+            logFile.appendText("""
+                =====================================
+                BLUETOOTH IDS MONITORING LOG
+                Started: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}
+                Model: ${idsModel.modelName}
+                Device: ${android.os.Build.MODEL}
+                =====================================
+                
+            """.trimIndent())
+
+            // Detailed analysis log header
+            detailedLogFile.appendText("""
+                =====================================
+                IDS DETAILED ANALYSIS LOG
+                Started: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}
+                =====================================
+                
+            """.trimIndent())
+        } catch (e: Exception) {
+            Log.e("BluetoothDataTransfer", "Failed to initialize log files", e)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -73,11 +105,16 @@ class BluetoothDataTransferService(
                     val deviceName = remoteDevice?.name ?: "Unknown"
                     val deviceAddress = remoteDevice?.address ?: "Unknown"
 
-                    Log.d("BluetoothDataTransfer", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.d("BluetoothDataTransfer", "📥 INCOMING MESSAGE")
-                    Log.d("BluetoothDataTransfer", "From: $deviceName ($deviceAddress)")
-                    Log.d("BluetoothDataTransfer", "Message: \"$messageText\"")
-                    Log.d("BluetoothDataTransfer", "Length: ${messageText.length} chars")
+                    // Enhanced logging with box drawing characters
+                    val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+
+                    Log.d("BluetoothDataTransfer", "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("BluetoothDataTransfer", "┃ 📥 INCOMING MESSAGE ANALYSIS")
+                    Log.d("BluetoothDataTransfer", "┃ Time: $timestamp")
+                    Log.d("BluetoothDataTransfer", "┃ From: $deviceName ($deviceAddress)")
+                    Log.d("BluetoothDataTransfer", "┃ Message: \"$messageText\"")
+                    Log.d("BluetoothDataTransfer", "┃ Length: ${messageText.length} chars | Bytes: $byteCount")
+                    Log.d("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     // Log incoming message to file
                     logMessage(
@@ -87,7 +124,7 @@ class BluetoothDataTransferService(
                         direction = "INCOMING"
                     )
 
-                    // IDS Analysis
+                    // IDS Analysis with detailed timing
                     val analysisStartTime = System.currentTimeMillis()
                     val detectionResult = withContext(Dispatchers.Default) {
                         idsModel.analyzeMessage(
@@ -99,21 +136,36 @@ class BluetoothDataTransferService(
                     }
                     val analysisTime = System.currentTimeMillis() - analysisStartTime
 
-                    // Enhanced logging of IDS results
-                    Log.d("BluetoothDataTransfer", "┌─── IDS ANALYSIS RESULTS ───")
-                    Log.d("BluetoothDataTransfer", "│ Status: ${if (detectionResult.isAttack) "🚨 ATTACK DETECTED" else "✅ SAFE"}")
-                    Log.d("BluetoothDataTransfer", "│ Attack Type: ${detectionResult.attackType}")
-                    Log.d("BluetoothDataTransfer", "│ Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%")
-                    Log.d("BluetoothDataTransfer", "│ Pattern Match: ${detectionResult.patternMatch}")
-                    Log.d("BluetoothDataTransfer", "│ Explanation: ${detectionResult.explanation}")
-                    Log.d("BluetoothDataTransfer", "│ Analysis Time: ${analysisTime}ms")
-                    Log.d("BluetoothDataTransfer", "│ Should Notify: ${detectionResult.shouldNotify}")
-                    Log.d("BluetoothDataTransfer", "└────────────────────────────")
+                    // Enhanced logging of IDS results with visual indicators
+                    val statusIcon = if (detectionResult.isAttack) "🚨" else "✅"
+                    val statusColor = if (detectionResult.isAttack) "ATTACK DETECTED" else "SAFE"
+
+                    Log.d("BluetoothDataTransfer", "┏━━━ IDS ANALYSIS RESULTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("BluetoothDataTransfer", "┃ $statusIcon Status: $statusColor")
+                    Log.d("BluetoothDataTransfer", "┃ 🎯 Attack Type: ${detectionResult.attackType}")
+                    Log.d("BluetoothDataTransfer", "┃ 📊 Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%")
+                    Log.d("BluetoothDataTransfer", "┃ 🔍 Pattern Match: ${detectionResult.patternMatch}")
+                    Log.d("BluetoothDataTransfer", "┃ 💡 Explanation: ${detectionResult.explanation}")
+                    Log.d("BluetoothDataTransfer", "┃ ⏱️ Analysis Time: ${analysisTime}ms")
+                    Log.d("BluetoothDataTransfer", "┃ 🔔 Should Notify: ${detectionResult.shouldNotify}")
+                    Log.d("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                    // Log detailed analysis to file
+                    logDetailedAnalysis(
+                        timestamp = timestamp,
+                        deviceName = deviceName,
+                        deviceAddress = deviceAddress,
+                        message = messageText,
+                        detectionResult = detectionResult,
+                        analysisTime = analysisTime
+                    )
 
                     if (detectionResult.isAttack) {
-                        Log.w("BluetoothDataTransfer", "⚠️ SECURITY THREAT DETECTED ⚠️")
-                        Log.w("BluetoothDataTransfer", "Attack Type: ${detectionResult.attackType}")
-                        Log.w("BluetoothDataTransfer", "From Device: $deviceName ($deviceAddress)")
+                        Log.w("BluetoothDataTransfer", "┏━━━ ⚠️ SECURITY THREAT DETECTED ⚠️ ━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        Log.w("BluetoothDataTransfer", "┃ Attack Type: ${detectionResult.attackType}")
+                        Log.w("BluetoothDataTransfer", "┃ From Device: $deviceName ($deviceAddress)")
+                        Log.w("BluetoothDataTransfer", "┃ Threat Level: ${getThreatLevel(detectionResult.confidence)}")
+                        Log.w("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                         if (detectionResult.shouldNotify) {
                             // Send security alert to UI
@@ -123,16 +175,14 @@ class BluetoothDataTransferService(
                                     deviceName = deviceName,
                                     deviceAddress = deviceAddress,
                                     message = messageText,
-                                    detectionMethod = "Enhanced IDS v8.0",
+                                    detectionMethod = "Enhanced IDS v9.0",
                                     explanation = detectionResult.explanation
                                 )
                             )
 
-                            // DO NOT send alert back to attacker - this causes confusion
-                            // The victim should see the alert in their UI, not the attacker
-                            Log.d("BluetoothDataTransfer", "Security alert sent to UI")
+                            Log.d("BluetoothDataTransfer", "📢 Security alert sent to UI")
                         } else {
-                            Log.d("BluetoothDataTransfer", "Attack detected but notification suppressed (rate limiting)")
+                            Log.d("BluetoothDataTransfer", "🔇 Attack detected but notification suppressed (rate limiting)")
                         }
                     }
 
@@ -146,9 +196,10 @@ class BluetoothDataTransferService(
                         attackConfidence = if (detectionResult.isAttack) detectionResult.confidence else 0.0
                     )
 
-
                     emit(message)
-                    Log.d("BluetoothDataTransfer", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                    // Log performance metrics periodically
+                    logPerformanceMetrics()
 
                 } catch (e: IOException) {
                     if (e.message?.contains("bt socket closed") == true ||
@@ -167,6 +218,7 @@ class BluetoothDataTransferService(
             Log.e("BluetoothDataTransfer", "Error in message listening loop", e)
         } finally {
             Log.d("BluetoothDataTransfer", "Message listening stopped")
+            logFinalStatistics()
         }
     }.flowOn(Dispatchers.IO)
 
@@ -182,12 +234,15 @@ class BluetoothDataTransferService(
             val remoteDevice = socket.remoteDevice
             val deviceName = remoteDevice?.name ?: "Unknown"
             val deviceAddress = remoteDevice?.address ?: "Unknown"
+            val timestamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
 
-            Log.d("BluetoothDataTransfer", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            Log.d("BluetoothDataTransfer", "📤 OUTGOING MESSAGE")
-            Log.d("BluetoothDataTransfer", "To: $deviceName ($deviceAddress)")
-            Log.d("BluetoothDataTransfer", "Message: \"$messageText\"")
-            Log.d("BluetoothDataTransfer", "Length: ${messageText.length} chars")
+            Log.d("BluetoothDataTransfer", "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            Log.d("BluetoothDataTransfer", "┃ 📤 OUTGOING MESSAGE ANALYSIS")
+            Log.d("BluetoothDataTransfer", "┃ Time: $timestamp")
+            Log.d("BluetoothDataTransfer", "┃ To: $deviceName ($deviceAddress)")
+            Log.d("BluetoothDataTransfer", "┃ Message: \"$messageText\"")
+            Log.d("BluetoothDataTransfer", "┃ Length: ${messageText.length} chars")
+            Log.d("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             // Log the outgoing message
             logMessage(
@@ -208,12 +263,12 @@ class BluetoothDataTransferService(
             val analysisTime = System.currentTimeMillis() - analysisStartTime
 
             // Log outgoing analysis results
-            Log.d("BluetoothDataTransfer", "┌─── OUTGOING IDS ANALYSIS ───")
-            Log.d("BluetoothDataTransfer", "│ Status: ${if (detectionResult.isAttack) "⚠️ SUSPICIOUS" else "✅ SAFE"}")
-            Log.d("BluetoothDataTransfer", "│ Type: ${detectionResult.attackType}")
-            Log.d("BluetoothDataTransfer", "│ Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%")
-            Log.d("BluetoothDataTransfer", "│ Analysis Time: ${analysisTime}ms")
-            Log.d("BluetoothDataTransfer", "└────────────────────────────")
+            Log.d("BluetoothDataTransfer", "┏━━━ OUTGOING IDS ANALYSIS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            Log.d("BluetoothDataTransfer", "┃ Status: ${if (detectionResult.isAttack) "⚠️ SUSPICIOUS" else "✅ SAFE"}")
+            Log.d("BluetoothDataTransfer", "┃ Type: ${detectionResult.attackType}")
+            Log.d("BluetoothDataTransfer", "┃ Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%")
+            Log.d("BluetoothDataTransfer", "┃ Analysis Time: ${analysisTime}ms")
+            Log.d("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             if (detectionResult.isAttack) {
                 Log.w("BluetoothDataTransfer", "⚠️ WARNING: Outgoing message contains attack patterns!")
@@ -226,7 +281,6 @@ class BluetoothDataTransferService(
             socket.outputStream.flush()
 
             Log.d("BluetoothDataTransfer", "✓ Message sent successfully")
-            Log.d("BluetoothDataTransfer", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             return@withContext true
 
@@ -238,6 +292,84 @@ class BluetoothDataTransferService(
         } catch (e: Exception) {
             Log.e("BluetoothDataTransfer", "Unexpected error sending message", e)
             return@withContext false
+        }
+    }
+
+    private fun getThreatLevel(confidence: Double): String {
+        return when {
+            confidence >= 0.9 -> "CRITICAL"
+            confidence >= 0.7 -> "HIGH"
+            confidence >= 0.5 -> "MEDIUM"
+            else -> "LOW"
+        }
+    }
+
+    private suspend fun logDetailedAnalysis(
+        timestamp: String,
+        deviceName: String,
+        deviceAddress: String,
+        message: String,
+        detectionResult: IDSModel.AnalysisResult,
+        analysisTime: Long
+    ) {
+        if (!isLoggingEnabled.get()) return
+
+        try {
+            val logEntry = buildString {
+                appendLine("=====================================")
+                appendLine("TIMESTAMP: $timestamp")
+                appendLine("DEVICE: $deviceName ($deviceAddress)")
+                appendLine("MESSAGE: $message")
+                appendLine("-------------------------------------")
+                appendLine("ANALYSIS RESULTS:")
+                appendLine("  Status: ${if (detectionResult.isAttack) "ATTACK DETECTED" else "SAFE"}")
+                appendLine("  Attack Type: ${detectionResult.attackType}")
+                appendLine("  Confidence: ${String.format("%.1f", detectionResult.confidence * 100)}%")
+                appendLine("  Pattern Match: ${detectionResult.patternMatch}")
+                appendLine("  Explanation: ${detectionResult.explanation}")
+                appendLine("  Analysis Time: ${analysisTime}ms")
+                appendLine("=====================================")
+                appendLine()
+            }
+
+            withContext(Dispatchers.IO) {
+                detailedLogFile.appendText(logEntry)
+            }
+        } catch (e: Exception) {
+            Log.e("BluetoothDataTransfer", "Failed to log detailed analysis", e)
+        }
+    }
+
+    private fun logPerformanceMetrics() {
+        // Log performance metrics every 50 messages
+        val stats = idsModel.getStatistics()
+        if (stats.contains("Total Messages") && stats.contains("50")) {
+            Log.i("BluetoothDataTransfer", "┏━━━ PERFORMANCE METRICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            stats.lines().forEach { line ->
+                if (line.isNotBlank()) {
+                    Log.i("BluetoothDataTransfer", "┃ $line")
+                }
+            }
+            Log.i("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        }
+    }
+
+    private fun logFinalStatistics() {
+        Log.i("BluetoothDataTransfer", "┏━━━ FINAL IDS STATISTICS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        val stats = idsModel.getStatistics()
+        stats.lines().forEach { line ->
+            if (line.isNotBlank()) {
+                Log.i("BluetoothDataTransfer", "┃ $line")
+            }
+        }
+        Log.i("BluetoothDataTransfer", "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        // Write final statistics to file
+        try {
+            val statsFile = File(logDirectory, "ids_final_statistics_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt")
+            statsFile.writeText(stats)
+        } catch (e: Exception) {
+            Log.e("BluetoothDataTransfer", "Failed to write final statistics", e)
         }
     }
 
@@ -257,6 +389,7 @@ class BluetoothDataTransferService(
             } finally {
                 scope.cancel("Connection closed")
                 Log.d("BluetoothDataTransfer", "=== IDS MONITORING STOPPED ===")
+                logFinalStatistics()
             }
         }
     }
